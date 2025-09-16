@@ -69,6 +69,7 @@
       return;
     }
 
+    // Tambahkan entry baru langsung ke tabel
     entries = [data as Entry, ...entries];
     resetForm();
   }
@@ -87,6 +88,7 @@
       return;
     }
 
+    // Hapus entry langsung dari tabel
     entries = entries.filter((e) => e.id !== id);
   }
 
@@ -106,18 +108,94 @@
     .reduce((s, e) => s + e.amount, 0);
 
   $: saldo = totalPemasukan - totalPengeluaran;
+
+  function formatCurrency(value: number) {
+    return new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+    }).format(value);
+  }
 </script>
+
+<style>
+  h1 {
+    text-align: center;
+    color: #333;
+  }
+
+  form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 20px;
+    justify-content: center;
+  }
+
+  input, select, button {
+    padding: 8px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+  }
+
+  button {
+    background-color: #4CAF50;
+    color: white;
+    cursor: pointer;
+    transition: 0.3s;
+  }
+
+  button:hover {
+    background-color: #45a049;
+  }
+
+  .table-container {
+    overflow-x: auto;
+    margin-top: 10px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 600px;
+  }
+
+  th, td {
+    padding: 10px;
+    text-align: center;
+    border-bottom: 1px solid #ddd;
+  }
+
+  th {
+    background-color: #f2f2f2;
+  }
+
+  tr:hover {
+    background-color: #f9f9f9;
+  }
+
+  p {
+    text-align: center;
+    font-weight: bold;
+  }
+
+  .error {
+    color: red;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+</style>
 
 <h1>Catatan Keuangan</h1>
 
 {#if error}
-  <p style="color:red">{error}</p>
+  <p class="error">{error}</p>
 {/if}
 
 <form on:submit|preventDefault={addEntry}>
   <input type="text" bind:value={name} placeholder="Nama" />
   <input type="date" bind:value={date} />
-  <input type="text" bind:value={amount} placeholder="Jumlah" />
+  <input type="number" bind:value={amount} placeholder="Jumlah" min="1" />
   <select bind:value={kind}>
     <option value="pemasukan">Pemasukan</option>
     <option value="pengeluaran">Pengeluaran</option>
@@ -132,30 +210,32 @@
 {:else if entries.length === 0}
   <p>Belum ada data.</p>
 {:else}
-  <table border="1" cellpadding="5">
-    <thead>
-      <tr>
-        <th>Nama</th>
-        <th>Tanggal</th>
-        <th>Jumlah</th>
-        <th>Jenis</th>
-        <th>Aksi</th>
-      </tr>
-    </thead>
-    <tbody>
-      {#each entries as e}
+  <div class="table-container">
+    <table>
+      <thead>
         <tr>
-          <td>{e.name}</td>
-          <td>{e.date}</td>
-          <td>{e.amount}</td>
-          <td>{e.kind}</td>
-          <td><button on:click={() => removeEntry(e.id)}>Hapus</button></td>
+          <th>Nama</th>
+          <th>Tanggal</th>
+          <th>Jumlah</th>
+          <th>Jenis</th>
+          <th>Aksi</th>
         </tr>
-      {/each}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {#each entries as e}
+          <tr>
+            <td>{e.name}</td>
+            <td>{e.date}</td>
+            <td>{formatCurrency(e.amount)}</td>
+            <td>{e.kind}</td>
+            <td><button on:click={() => removeEntry(e.id)}>Hapus</button></td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
 
-  <p><strong>Total Pemasukan:</strong> {totalPemasukan}</p>
-  <p><strong>Total Pengeluaran:</strong> {totalPengeluaran}</p>
-  <p><strong>Saldo:</strong> {saldo}</p>
+  <p><strong>Total Pemasukan:</strong> {formatCurrency(totalPemasukan)}</p>
+  <p><strong>Total Pengeluaran:</strong> {formatCurrency(totalPengeluaran)}</p>
+  <p><strong>Saldo:</strong> {formatCurrency(saldo)}</p>
 {/if}
