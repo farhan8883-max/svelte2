@@ -1,58 +1,61 @@
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
-  import { goto } from "$app/navigation";
-
+  let full_name = "";
+  let username = "";
   let email = "";
   let password = "";
+  let role = "santri"; // default
   let message = "";
 
-  async function login() {
-    if (!email || !password) {
-      message = "Email dan password wajib diisi";
+  async function register() {
+    if (!full_name || !username || !email || !password) {
+      message = "Semua field wajib diisi";
       return;
     }
 
     const password_hash = btoa(password);
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("users")
-      .select("*")
-      .eq("email", email)
-      .eq("password_hash", password_hash)
-      .single();
+      .insert([{ full_name, username, email, password_hash, role }]);
 
-    if (error || !data) {
-      message = "Email atau password salah";
-      return;
-    }
-
-    message = "Login berhasil!";
-    localStorage.setItem("user", JSON.stringify(data));
-
-    if (data.role === "admin") {
-      goto("/dashboard");
+    if (error) {
+      message = "Gagal daftar: " + error.message;
     } else {
-      goto("/santri");
+      message = "Registrasi berhasil, silakan login.";
+      full_name = "";
+      username = "";
+      email = "";
+      password = "";
+      role = "santri";
     }
   }
 </script>
 
 <div class="wrapper">
-  <div class="login-container">
+  <div class="register-container">
   <div class="brand">
     <img src="/logo.png" alt="Logo" class="logo" />
     <span class="company-name">Daarulhikam</span>
   </div>
 
-  <div class="login-box">
-    <h1>Login</h1>
+  <div class="register-box">
+    <h1>Register</h1>
+    <input placeholder="Nama Lengkap" bind:value={full_name} />
+    <input placeholder="Username" bind:value={username} />
     <input type="email" placeholder="Email" bind:value={email} />
     <input type="password" placeholder="Password" bind:value={password} />
-    <button on:click={login}>Login</button>
+
+    <select bind:value={role}>
+      <option value="santri">Santri</option>
+      <option value="admin">Admin</option>
+    </select>
+
+    <button on:click={register}>Daftar</button>
     <p class="message">{message}</p>
 
-    <p class="register">
-      Belum punya akun? <a href="/register">Daftar di sini</a>
+    <p class="login-link">
+      Sudah punya akun? <a href="/login">Login di sini</a>
     </p>
   </div>
 </div>
@@ -63,18 +66,18 @@
     margin: 0;
     font-family: "Poppins", sans-serif;
     background: linear-gradient(135deg, #cce7ff, #e6f4ff);
+    height: 100vh;
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 100vh;
   }
 
-  .login-container {
+  .register-container {
     background: #ffffff;
     padding: 2rem 3rem;
     border-radius: 20px;
     box-shadow: 0 10px 25px rgba(0, 123, 255, 0.2);
-    width: 350px;
+    width: 380px;
     text-align: center;
     animation: fadeIn 0.7s ease;
   }
@@ -103,7 +106,8 @@
     margin-bottom: 1rem;
   }
 
-  input {
+  input,
+  select {
     width: 100%;
     padding: 10px 14px;
     margin: 8px 0;
@@ -114,7 +118,8 @@
     transition: all 0.3s ease;
   }
 
-  input:focus {
+  input:focus,
+  select:focus {
     border-color: #007bff;
     box-shadow: 0 0 8px rgba(0, 123, 255, 0.3);
   }
@@ -144,18 +149,18 @@
     font-size: 0.9rem;
   }
 
-  .register {
+  .login-link {
     margin-top: 1rem;
     font-size: 0.9rem;
   }
 
-  .register a {
+  .login-link a {
     color: #007bff;
     text-decoration: none;
     font-weight: bold;
   }
 
-  .register a:hover {
+  .login-link a:hover {
     text-decoration: underline;
   }
 
@@ -175,5 +180,4 @@
   align-items: center;
   height: 100vh;
 }
-
 </style>
