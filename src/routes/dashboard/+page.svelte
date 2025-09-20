@@ -202,6 +202,11 @@
     <img src="/logo.png" alt="Logo" />
     <h2>PPs Daarulhikam</h2>
   </div>
+  <!-- 🔽 Tambahin button di sini -->
+  <button on:click={() => goto("/edit")} class="download-wrapper">
+  ✏️ Edit User
+  </button>
+  <!-- 🔼 -->
   <button class="logout-btn" on:click={logout}>🚪 Logout</button>
 </div>
 
@@ -340,6 +345,8 @@
   td button:last-child { background:#e53935; color:#fff; }
   .logout-btn { width:100%; padding:10px; margin-top:20px; background:#e53935; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; text-align:left; }
   .logout-btn:hover { background:#c62828; }
+  .download-wrapper { width:100%; padding:10px; margin-top:20px; background:#ff9800; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; text-align:left; }
+  .download-wrapper:hover { background:#eda435; }
   .toggle-wrapper { margin:15px 0; text-align:right; }
   .toggle-btn { padding:10px 18px; border:none; border-radius:6px; background:#43a047; color:#fff; cursor:pointer; font-size:14px; }
   .toggle-btn:hover { background:#2e7d32; }
