@@ -5,7 +5,9 @@
 </script>
 
 <svelte:head>
-	<link rel="icon" href={favicon} />
+	<!-- <link rel="icon" href={favicon} /> -->
+	 <link rel="icon" href="/logo.png" />
+    <title>Daarulhikam</title>
 </svelte:head>
 
 {@render children?.()}
