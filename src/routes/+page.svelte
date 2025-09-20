@@ -11,7 +11,6 @@
       message = "Email dan password wajib diisi";
       return;
     }
-
     const password_hash = btoa(password);
 
     const { data, error } = await supabase
