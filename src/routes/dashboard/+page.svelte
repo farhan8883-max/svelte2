@@ -192,7 +192,7 @@
 
 <!-- Header mobile -->
 <div class="mobile-header">
-  <span class="brand-mobile">Project Hafiz</span>
+  <span class="brand-mobile">PPs Daarulhikam</span>
   <button class="hamburger" on:click={toggleSidebar}>☰</button>
 </div>
 
@@ -200,7 +200,7 @@
 <div class="sidebar {sidebarOpen ? 'open' : ''}">
   <div class="brand">
     <img src="/logo.png" alt="Logo" />
-    <h2>Project Hafiz</h2>
+    <h2>PPs Daarulhikam</h2>
   </div>
   <button class="logout-btn" on:click={logout}>🚪 Logout</button>
 </div>
