@@ -3,12 +3,14 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation"; // buat navigasi ke dashboard
 
-  interface User {
-    id: number;
-    email: string;
-    password_hash: string;
-    full_name: string;
-  }
+interface User {
+  id: number;
+  email: string;
+  username: string;
+  password_hash: string;
+  full_name: string;
+  role: "admin" | "santri";
+}
 
   let users: User[] = [];
   let editingId: number | null = null;
@@ -17,12 +19,21 @@
   let email = "";
   let password = "";
   let full_name = "";
+  let username = "";
+let role: "admin" | "santri" = "santri";
 
   let message = "";
+  let currentUser: any = null;
 
   onMount(async () => {
-    await loadUsers();
-  });
+  const storedUser = localStorage.getItem("user");
+
+  if (storedUser) {
+    currentUser = JSON.parse(storedUser);
+  }
+
+  await loadUsers();
+});
 
   async function loadUsers() {
     const { data, error } = await supabase.from("users").select("*").order("id");
@@ -34,13 +45,17 @@
   }
 
   async function saveUser() {
-    if (!email || !full_name || (!editingId && !password)) {
+    if (!email || !username || !full_name || (!editingId && !password)) {
       message = "⚠️ Semua field wajib diisi (password wajib saat tambah)";
       return;
     }
 
-    const data: any = { email, full_name };
-
+    const data: any = {
+  email,
+  username,
+  full_name,
+  role
+};
     if (password) {
       // konsisten dengan register: encode password pakai btoa
       data.password_hash = btoa(password);
@@ -66,30 +81,47 @@
     await loadUsers();
   }
 
+  
   function editUser(u: User) {
     editingId = u.id;
     email = u.email;
+    username = u.username;
     full_name = u.full_name;
+    role = u.role;
     password = ""; // kosongkan (isi jika ingin ganti password)
   }
 
   async function deleteUser(id: number) {
-    if (!confirm("Yakin hapus user ini?")) return;
-    const { error } = await supabase.from("users").delete().eq("id", id);
-    if (error) {
-      message = "❌ Gagal hapus: " + error.message;
-      return;
-    }
-    message = "✅ User berhasil dihapus";
-    await loadUsers();
+  // cegah hapus akun sendiri
+  if (currentUser?.id === id) {
+    message = "❌ Akun yang sedang login tidak bisa dihapus";
+    return;
   }
 
-  function resetForm() {
-    editingId = null;
-    email = "";
-    full_name = "";
-    password = "";
+  if (!confirm("Yakin hapus user ini?")) return;
+
+  const { error } = await supabase
+    .from("users")
+    .delete()
+    .eq("id", id);
+
+  if (error) {
+    message = "❌ Gagal hapus: " + error.message;
+    return;
   }
+
+  message = "✅ User berhasil dihapus";
+  await loadUsers();
+}
+
+function resetForm() {
+  editingId = null;
+  email = "";
+  username = "";
+  full_name = "";
+  password = "";
+  role = "santri";
+}
 
   function backToDashboard() {
     goto("/dashboard"); // arahkan ke halaman dashboard
@@ -98,7 +130,7 @@
 
 <div class="container">
   <h1>Kelola Users</h1>
-  <p>📌Hanya bisa edit user saja tidak bisa menambahakan user❗❗</p>
+  <p>📌Edit data user dan tambah user</p>
 
   <!-- Tombol kembali -->
   <button class="back-btn" on:click={backToDashboard}>⬅️ Kembali ke Dashboard</button>
@@ -108,8 +140,13 @@
   <!-- FORM EDIT / TAMBAH -->
   <form on:submit|preventDefault={saveUser}>
     <input type="email" placeholder="Email" bind:value={email} required />
+    <input type="text" placeholder="Username" bind:value={username} required />
     <input type="text" placeholder="Nama Lengkap" bind:value={full_name} required />
     <input type="password" placeholder="Password (isi jika ganti)" bind:value={password} />
+    <select bind:value={role}>
+  <option value="santri">Santri</option>
+  <option value="admin">Admin</option>
+</select>
 
     <button type="submit">{editingId ? "Update User" : "Tambah User"}</button>
     {#if editingId}
@@ -130,7 +167,11 @@
             <th>ID</th>
             <th>Email</th>
             <th>Nama</th>
+            <th>Username</th>
+            <th>Username</th>
+            <th>Role</th>
             <th>Aksi</th>
+            
           </tr>
         </thead>
         <tbody>
@@ -139,9 +180,18 @@
               <td>{u.id}</td>
               <td>{u.email}</td>
               <td>{u.full_name}</td>
+              <td>{u.username}</td>
+              <td>{u.role}</td>
               <td>
                 <button class="edit" on:click={() => editUser(u)}>✏️ Edit</button>
-                <button class="delete" on:click={() => deleteUser(u.id)}>🗑️ Hapus</button>
+                <button
+  class="delete"
+  disabled={currentUser?.id === u.id}
+  class:disabled-btn={currentUser?.id === u.id}
+  on:click={() => deleteUser(u.id)}
+>
+  🗑️ Hapus
+</button>
               </td>
             </tr>
           {/each}
@@ -239,4 +289,9 @@
     margin: 10px 0;
     font-weight: bold;
   }
+  .disabled-btn {
+  background: #ccc !important;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
 </style>

@@ -41,6 +41,56 @@
   let currentUser: User | null = null;
   let selectedUserId: string = "";
 
+  // saldo
+let totalSaldo = 0;
+
+// statistik dashboard
+let totalSantri = 0;
+let santriMinus = 0;
+
+let showMinusList = false;
+let showMinusModal = false;
+let minusUsers: { username: string; saldo: number }[] = [];
+
+function calculateStats() {
+  totalSantri = users.filter((u) => u.role === "santri").length;
+
+  const saldoMap: Record<string, number> = {};
+
+  entries.forEach((entry) => {
+    if (!saldoMap[entry.user_id]) {
+      saldoMap[entry.user_id] = 0;
+    }
+
+    if (entry.kind === "pemasukan") {
+      saldoMap[entry.user_id] += entry.amount;
+    } else {
+      saldoMap[entry.user_id] -= entry.amount;
+    }
+  });
+
+  santriMinus = Object.values(saldoMap).filter((saldo) => saldo < 0).length;
+
+  // daftar user minus
+  minusUsers = users
+    .filter((u) => u.role === "santri")
+    .map((u) => ({
+      username: u.username,
+      saldo: saldoMap[u.id] || 0
+    }))
+    .filter((u) => u.saldo < 0);
+}
+
+function calculateSaldo() {
+  totalSaldo = entries.reduce((total, entry) => {
+    if (entry.kind === "pemasukan") {
+      return total + entry.amount;
+    } else {
+      return total - entry.amount;
+    }
+  }, 0);
+}
+
   onMount(async () => {
     const storedUser = localStorage.getItem("user");
     if (!storedUser) {
@@ -89,13 +139,16 @@
     }
   }
 
-  function applyFilter() {
-    if (activeSection === "all") {
-      filteredEntries = entries;
-    } else {
-      filteredEntries = entries.filter((e) => e.kind === activeSection);
-    }
+function applyFilter() {
+  if (activeSection === "all") {
+    filteredEntries = entries;
+  } else {
+    filteredEntries = entries.filter((e) => e.kind === activeSection);
   }
+
+  calculateSaldo();
+  calculateStats();
+}
 
   function setSection(section: "all" | "pemasukan" | "pengeluaran") {
     activeSection = section;
@@ -192,7 +245,7 @@
 
 <!-- Header mobile -->
 <div class="mobile-header">
-  <span class="brand-mobile">PPs Daarulhikam</span>
+  <span class="brand-mobile">Daarulhikam</span>
   <button class="hamburger" on:click={toggleSidebar}>☰</button>
 </div>
 
@@ -200,20 +253,98 @@
 <div class="sidebar {sidebarOpen ? 'open' : ''}">
   <div class="brand">
     <img src="/logo.png" alt="Logo" />
-    <h2>PPs Daarulhikam</h2>
+    <h2>Daarulhikam</h2>
   </div>
   <!-- 🔽 Tambahin button di sini -->
   <button on:click={() => goto("/edit")} class="download-wrapper">
   ✏️ Edit User
   </button>
   <!-- 🔼 -->
+    <!-- BUTTON KE HALAMAN TABLE -->
+    <button class="table-btn" on:click={() => goto("/table")}>
+      📋 Lihat Data
+    </button>
   <button class="logout-btn" on:click={logout}>🚪 Logout</button>
 </div>
 
 <!-- Main -->
 <div class="main">
+  <div class="dashboard-header">
   <h1>Dashboard {currentUser?.role === "admin" ? "Admin" : "Santri"}</h1>
-  <p class="message">{message}</p>
+
+  {#if currentUser}
+    <div class="user-info">
+      👤 Login sebagai:
+      <span>{currentUser.username}</span>
+    </div>
+  {/if}
+</div>
+
+<!-- Dashboard Cards -->
+<div class="stats-grid">
+
+  <div class="stat-card blue">
+    <h3>👨‍🎓 Total Santri</h3>
+    <p>{totalSantri}</p>
+  </div>
+
+  <div class="stat-card green">
+    <h3>💰 Total Saldo</h3>
+    <p>Rp {formatRupiah(totalSaldo)}</p>
+  </div>
+
+  <div
+  class="stat-card red clickable"
+  on:click={() => (showMinusModal = true)}
+>
+  <h3>💸 Santri Minus</h3>
+  <p>{santriMinus}</p>
+</div>
+
+</div>
+
+{#if showMinusModal}
+  <div class="modal-overlay" on:click={() => (showMinusModal = false)}>
+    <div class="modal-content" on:click|stopPropagation>
+
+      <div class="modal-header">
+        <h2>💸 Daftar Santri Minus</h2>
+
+        <button
+          class="close-btn"
+          on:click={() => (showMinusModal = false)}
+        >
+          ✖
+        </button>
+      </div>
+
+      {#if minusUsers.length === 0}
+        <p class="empty-text">
+          Tidak ada santri dengan saldo minus.
+        </p>
+      {:else}
+
+        <div class="minus-wrapper">
+          {#each minusUsers as user}
+            <div class="minus-card">
+              <div>
+                <h3>{user.username}</h3>
+                <p>Saldo Minus</p>
+              </div>
+
+              <strong>
+                Rp {formatRupiah(Math.abs(user.saldo))}
+              </strong>
+            </div>
+          {/each}
+        </div>
+
+      {/if}
+    </div>
+  </div>
+{/if}
+
+<p class="message">{message}</p>
 
   <!-- Pilih User (khusus Admin) -->
   {#if currentUser?.role === "admin"}
@@ -353,4 +484,248 @@
   .form-section, .data-section { margin-top:20px; animation: fade .3s ease-in-out; }
   @keyframes fade { from { opacity:0; transform:translateY(10px);} to { opacity:1; transform:translateY(0);} }
   @media(max-width:768px){ .mobile-header{display:flex;} .sidebar{transform:translateX(-100%);position:fixed;z-index:1000;} .sidebar.open{transform:translateX(0);} .main{margin-left:0;padding:15px;} table{display:block;overflow-x:auto;font-size:13px;} th,td{white-space:nowrap;} }
+  .dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.user-info {
+  background: #e3f2fd;
+  color: #1565c0;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.user-info span {
+  font-weight: bold;
+}
+.saldo-card {
+  background: linear-gradient(135deg, #43a047, #2e7d32);
+  color: white;
+  padding: 18px;
+  border-radius: 12px;
+  margin: 15px 0;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+}
+
+.saldo-card h3 {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.saldo-card p {
+  font-size: 28px;
+  font-weight: bold;
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.stat-card {
+  padding: 20px;
+  border-radius: 14px;
+  color: white;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+  transition: 0.3s;
+}
+
+.stat-card:hover {
+  transform: translateY(-4px);
+}
+
+.stat-card h3 {
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.stat-card p {
+  font-size: 28px;
+  font-weight: bold;
+}
+
+.blue {
+  background: linear-gradient(135deg, #1e88e5, #1565c0);
+}
+
+.green {
+  background: linear-gradient(135deg, #43a047, #2e7d32);
+}
+
+.red {
+  background: linear-gradient(135deg, #e53935, #b71c1c);
+}
+.clickable {
+  cursor: pointer;
+}
+
+.minus-list {
+  margin-top: 20px;
+  background: #fff;
+  padding: 20px;
+  border-radius: 14px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+  animation: fade .3s ease;
+}
+
+.minus-list h3 {
+  margin-bottom: 15px;
+  color: #e53935;
+}
+
+.minus-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid #eee;
+}
+
+.minus-item:last-child {
+  border-bottom: none;
+}
+
+.minus-item strong {
+  color: #e53935;
+}
+.clickable {
+  cursor: pointer;
+}
+
+/* OVERLAY */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.45);
+
+  display: flex;
+  justify-content: center;
+  align-items: center;
+
+  z-index: 9999;
+  animation: fadeIn 0.25s ease;
+}
+
+/* BOX */
+.modal-content {
+  width: 90%;
+  max-width: 500px;
+
+  background: white;
+  border-radius: 18px;
+
+  padding: 22px;
+
+  box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+
+  animation: scaleIn 0.25s ease;
+}
+
+/* HEADER */
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  margin-bottom: 20px;
+}
+
+.modal-header h2 {
+  color: #e53935;
+  font-size: 22px;
+}
+
+/* CLOSE */
+.close-btn {
+  border: none;
+  background: #f5f5f5;
+
+  width: 35px;
+  height: 35px;
+
+  border-radius: 50%;
+
+  cursor: pointer;
+  font-size: 16px;
+
+  transition: 0.2s;
+}
+
+.close-btn:hover {
+  background: #e53935;
+  color: white;
+}
+
+/* LIST */
+.minus-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.minus-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  background: #fff5f5;
+
+  border-left: 5px solid #e53935;
+
+  padding: 15px;
+  border-radius: 12px;
+}
+
+.minus-card h3 {
+  margin-bottom: 4px;
+  color: #333;
+}
+
+.minus-card p {
+  color: #888;
+  font-size: 13px;
+}
+
+.minus-card strong {
+  color: #e53935;
+  font-size: 18px;
+}
+
+/* EMPTY */
+.empty-text {
+  text-align: center;
+  color: #666;
+  padding: 20px 0;
+}
+
+/* ANIMATION */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
 </style>

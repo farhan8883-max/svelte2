@@ -20,8 +20,15 @@
       .insert([{ full_name, username, email, password_hash, role }]);
 
     if (error) {
-      message = "Gagal daftar: " + error.message;
-    } else {
+  if (
+    error.message.includes("duplicate key") ||
+    error.message.includes("users_email_key")
+  ) {
+    message = "Email ini sudah digunakan";
+  } else {
+    message = "Gagal daftar: " + error.message;
+  }
+} else {
       message = "Registrasi berhasil, silakan login.";
       full_name = "";
       username = "";
