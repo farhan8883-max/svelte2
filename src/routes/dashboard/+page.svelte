@@ -256,14 +256,34 @@ function applyFilter() {
     <h2>Daarulhikam</h2>
   </div>
   <!-- 🔽 Tambahin button di sini -->
-  <button on:click={() => goto("/edit")} class="download-wrapper">
+  <button
+  on:click={() => goto("/edit")}
+  class="table-btn edit-btn"
+>
   ✏️ Edit User
-  </button>
-  <!-- 🔼 -->
-    <!-- BUTTON KE HALAMAN TABLE -->
-    <button class="table-btn" on:click={() => goto("/table")}>
-      📋 Lihat Data
-    </button>
+</button>
+
+<button
+  class="table-btn"
+  on:click={() => goto("/table")}
+>
+  📋 Lihat Data
+</button>
+
+<button
+  class="table-btn"
+  on:click={() => goto("/market")}
+>
+  🛒 Market
+</button>
+
+<button
+  class="table-btn admin-btn"
+  on:click={() => goto("/admin-market")}
+>
+  ⚙️ Admin Market
+</button>
+
   <button class="logout-btn" on:click={logout}>🚪 Logout</button>
 </div>
 
@@ -727,5 +747,59 @@ function applyFilter() {
     transform: scale(1);
     opacity: 1;
   }
+}
+.table-btn {
+  width: 100%;
+  padding: 12px 14px;
+  margin-top: 12px;
+
+  background: linear-gradient(135deg, #42a5f5, #1e88e5);
+  color: white;
+
+  border: none;
+  border-radius: 10px;
+
+  cursor: pointer;
+
+  font-size: 14px;
+  font-weight: 600;
+
+  text-align: left;
+
+  transition: all 0.25s ease;
+
+  box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+}
+
+/* hover */
+.table-btn:hover {
+  transform: translateY(-2px);
+
+  background: linear-gradient(135deg, #64b5f6, #1565c0);
+
+  box-shadow: 0 6px 14px rgba(0,0,0,0.18);
+}
+
+/* klik */
+.table-btn:active {
+  transform: scale(0.98);
+}
+
+/* khusus admin market */
+.admin-btn {
+  background: linear-gradient(135deg, #ff7043, #e64a19);
+}
+
+.admin-btn:hover {
+  background: linear-gradient(135deg, #ff8a65, #d84315);
+}
+
+/* khusus edit user */
+.edit-btn {
+  background: linear-gradient(135deg, #ffa726, #fb8c00);
+}
+
+.edit-btn:hover {
+  background: linear-gradient(135deg, #ffb74d, #ef6c00);
 }
 </style>
