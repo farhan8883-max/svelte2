@@ -1,4 +1,3 @@
-
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
   import { onMount, tick } from "svelte";
