@@ -1,3 +1,4 @@
+
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
   import { onMount, tick } from "svelte";
@@ -59,6 +60,22 @@
     tingkat: string;
   }
 
+  interface StudentGrade {
+    id: number;
+    user_id: number;
+    class_id: number;
+    academic_year: string;
+    semester: number;
+    subject: string;
+    nilai_tugas: number | null;
+    nilai_ulangan_harian: number | null;
+    nilai_pts: number | null;
+    nilai_pas: number | null;
+    nilai_sikap_karakter: number | null;
+    nilai_ujian_sekolah: number | null;
+    nilai_akhir: number | null;
+  }
+
   /* =========================================================
      STATE
   ========================================================= */
@@ -82,6 +99,8 @@
   let loadingAbsensi = false;
   let loadingSPP = false;
   let loadingPengumuman = false;
+  let loadingNilai = false;
+  let nilaiList: StudentGrade[] = [];
 
   /* =========================================================
      PROFILE
@@ -103,7 +122,8 @@
     | "jadwal"
     | "pengumuman"
     | "prestasi"
-    | "spp" = "home";
+    | "spp"
+    | "nilai" = "home";
 
   let keuanganTab: "pemasukan" | "pengeluaran" = "pemasukan";
 
@@ -218,7 +238,8 @@
       loadEntries(),
       loadAbsensi(),
       loadSPP(),
-      loadPengumuman()
+      loadPengumuman(),
+      loadNilai()
     ]);
   });
 
@@ -396,6 +417,46 @@
 
     pengumumanList =
       (data || []) as Pengumuman[];
+  }
+
+  /* =========================================================
+     LOAD NILAI
+  ========================================================= */
+
+  async function loadNilai() {
+    if (!user?.id) return;
+
+    loadingNilai = true;
+
+    const { data, error } = await supabase
+      .from("student_grades")
+      .select(`
+        id,
+        user_id,
+        class_id,
+        academic_year,
+        semester,
+        subject,
+        nilai_tugas,
+        nilai_ulangan_harian,
+        nilai_pts,
+        nilai_pas,
+        nilai_sikap_karakter,
+        nilai_ujian_sekolah,
+        nilai_akhir
+      `)
+      .eq("user_id", user.id)
+      .order("subject", { ascending: true });
+
+    loadingNilai = false;
+
+    if (error) {
+      console.error("Gagal memuat nilai:", error);
+      message = "Gagal memuat data nilai: " + error.message;
+      return;
+    }
+
+    nilaiList = (data || []) as StudentGrade[];
   }
 
   /* =========================================================
@@ -586,6 +647,10 @@
 
     if (section === "spp") {
       await loadSPP();
+    }
+
+    if (section === "nilai") {
+      await loadNilai();
     }
 
     if (section === "keuangan") {
@@ -1203,6 +1268,28 @@
 
               <span>
                 Prestasi
+              </span>
+
+            </button>
+
+
+            <button
+              class="menu-item"
+              on:click={() =>
+                switchSection("nilai")}
+            >
+
+              <div
+                class="
+                  icon-circle
+                  bg-purple
+                "
+              >
+                📚
+              </div>
+
+              <span>
+                Nilai Santri
               </span>
 
             </button>
@@ -2285,6 +2372,60 @@
 
 
     <!-- =================================================
+         NILAI
+    ================================================== -->
+
+    {#if activeSection === "nilai"}
+      <div class="page-card">
+        <div class="card-header-flex">
+          <div>
+            <h3>Nilai Akademik Santri</h3>
+            <p class="sub-desc margin-0">Nilai tugas, ulangan harian, PTS, PAS, sikap, ujian sekolah, dan nilai akhir.</p>
+          </div>
+          <button class="btn-export" on:click={loadNilai}>🔄 Refresh</button>
+        </div>
+
+        {#if loadingNilai}
+          <p class="empty-msg">Memuat data nilai...</p>
+        {:else if nilaiList.length === 0}
+          <p class="empty-msg">Belum ada data nilai.</p>
+        {:else}
+          <div class="table-container">
+            <table class="app-table">
+              <thead>
+                <tr>
+                  <th>Mata Pelajaran</th>
+                  <th>Tugas</th>
+                  <th>Ulangan Harian</th>
+                  <th>PTS</th>
+                  <th>PAS</th>
+                  <th>Sikap</th>
+                  <th>Ujian Sekolah</th>
+                  <th>Nilai Akhir</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each nilaiList as item}
+                  <tr>
+                    <td class="font-semibold">{item.subject}</td>
+                    <td>{item.nilai_tugas ?? "-"}</td>
+                    <td>{item.nilai_ulangan_harian ?? "-"}</td>
+                    <td>{item.nilai_pts ?? "-"}</td>
+                    <td>{item.nilai_pas ?? "-"}</td>
+                    <td>{item.nilai_sikap_karakter ?? "-"}</td>
+                    <td>{item.nilai_ujian_sekolah ?? "-"}</td>
+                    <td class="font-semibold">{item.nilai_akhir ?? "-"}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+
+    <!-- =================================================
          PRESTASI
     ================================================== -->
 
@@ -2942,7 +3083,6 @@
   {/if}
 
 </div>
-
 
 <style>
 
