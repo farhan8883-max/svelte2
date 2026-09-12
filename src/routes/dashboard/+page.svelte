@@ -1,3 +1,4 @@
+
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
   import { onMount } from "svelte";
@@ -9,7 +10,10 @@
 
   interface User {
     id: number;
+    full_name: string;
     username: string;
+    email: string;
+    password_hash?: string;
     role: "admin" | "santri" | "ustad";
   }
 
@@ -51,8 +55,16 @@
   interface Schedule {
     id?: number;
     day: string;
+    class_name: string;
     subject: string;
     teacher_id: number | null;
+    time: string;
+  }
+
+  interface ScheduleFormItem {
+    class_name: string;
+    subject: string;
+    teacher_id: string;
     time: string;
   }
 
@@ -100,6 +112,37 @@
   ];
 
   /* =========================
+     SCHEDULE OPTIONS
+  ========================= */
+
+  const classOptions = [
+    "Kelas 1", "Kelas 2", "Kelas 3",
+    "Kelas 4", "Kelas 5", "Kelas 6", "Kelas 7", "Kelas 8", "Kelas 9", "Kelas 10", "Kelas 11", "Kelas 12", "SMA", "SMP", "SD"
+  ];
+
+  const subjectOptions = [
+    "None",
+    "Al-Qur'an",
+    "Tahfidz",
+    "Aqidah",
+    "Akhlak",
+    "Fiqih",
+    "Hadits",
+    "Bahasa Arab",
+    "Bahasa Indonesia",
+    "Bahasa Inggris",
+    "Matematika",
+    "IPA",
+    "IPS",
+    "Sejarah Islam"
+  ];
+
+  const dayOptions = [
+    "Senin", "Selasa", "Rabu", "Kamis",
+    "Jumat", "Sabtu", "Minggu"
+  ];
+
+  /* =========================
      MAIN STATE
   ========================= */
 
@@ -112,6 +155,11 @@
   let entries: Entry[] = [];
   let schedules: Schedule[] = [];
   let attendanceData: Attendance[] = [];
+
+  $: schedulesByDay = dayOptions.map(day => ({
+    day,
+    items: schedules.filter(schedule => schedule.day === day)
+  }));
   let announcements: Announcement[] = [];
 
   let sppData: Record<number, SPPRecord> = {};
@@ -146,12 +194,18 @@
   let showUserModal = false;
   let editingUserId: number | null = null;
 
+  let formFullName = "";
   let formUsername = "";
+  let formEmail = "";
+  let formPassword = "";
+  let formConfirmPassword = "";
 
   let formRole:
     | "admin"
     | "santri"
     | "ustad" = "santri";
+
+  let isSavingUser = false;
 
   /* =========================
      TOP UP
@@ -195,9 +249,10 @@
   let editingScheduleId: number | null = null;
 
   let scheduleDay = "";
-  let scheduleSubject = "";
-  let scheduleTeacherId = "";
-  let scheduleTime = "";
+
+  let scheduleItems: ScheduleFormItem[] = [
+    { class_name: "", subject: "None", teacher_id: "", time: "" }
+  ];
 
   /* =========================
      ANNOUNCEMENT
@@ -211,6 +266,13 @@
 
   let announcementTitle = "";
   let announcementContent = "";
+
+  /* =========================
+     ROLE DETAIL MODAL
+  ========================= */
+
+  let showRoleModal = false;
+  let selectedRole: "admin" | "santri" | "ustad" | null = null;
 
   /* =========================
      INITIAL LOAD
@@ -268,6 +330,13 @@
         user.role === "ustad"
     );
 
+  $: adminUsers = users.filter(user => user.role === "admin");
+
+  $: roleUsers =
+    selectedRole
+      ? users.filter(user => user.role === selectedRole)
+      : [];
+
   $: filteredSantri =
     santriUsers.filter(
       user =>
@@ -277,6 +346,27 @@
             searchKeyword.toLowerCase()
           )
     );
+
+  /* =========================
+     ROLE DETAIL MODAL
+  ========================= */
+
+  function openRoleModal(role: "admin" | "santri" | "ustad") {
+    selectedRole = role;
+    showRoleModal = true;
+  }
+
+  function closeRoleModal() {
+    showRoleModal = false;
+    selectedRole = null;
+  }
+
+  function getRoleLabel(role: "admin" | "santri" | "ustad" | null) {
+    if (role === "admin") return "Admin";
+    if (role === "santri") return "Santri";
+    if (role === "ustad") return "Ustad";
+    return "User";
+  }
 
   /* =========================
      ADMIN CHECK
@@ -291,34 +381,17 @@
 
   async function loadUsers() {
 
-    const {
-      data,
-      error
-    } = await supabase
+    const { data, error } = await supabase
       .from("users")
-      .select(
-        "id, username, role"
-      )
-      .order(
-        "username",
-        {
-          ascending: true
-        }
-      );
+      .select("id, full_name, username, email, role")
+      .order("username", { ascending: true });
 
     if (error) {
-
-      showToast(
-        "Gagal memuat user: " +
-          error.message,
-        true
-      );
-
+      showToast("Gagal memuat user: " + error.message, true);
       return;
     }
 
-    users =
-      (data || []) as User[];
+    users = (data || []) as User[];
   }
 
   /* =========================
@@ -701,202 +774,267 @@
      USER MODAL
   ========================= */
 
-  function openAddUserModal() {
-
-    if (!isAdmin) {
-
-      showToast(
-        "Hanya admin yang dapat menambah user.",
-        true
-      );
-
-      return;
-    }
-
+  function resetUserForm() {
     editingUserId = null;
-
+    formFullName = "";
     formUsername = "";
-
-    formRole =
-      "santri";
-
-    showUserModal = true;
+    formEmail = "";
+    formPassword = "";
+    formConfirmPassword = "";
+    formRole = "santri";
   }
 
-  function openEditUserModal(
-    user: User
-  ) {
-
+  function openAddUserModal() {
     if (!isAdmin) {
-
-      showToast(
-        "Hanya admin yang dapat mengedit user.",
-        true
-      );
-
+      showToast("❌ Hanya admin yang dapat menambah user.", true);
       return;
     }
 
-    editingUserId =
-      user.id;
-
-    formUsername =
-      user.username;
-
-    formRole =
-      user.role;
-
+    resetUserForm();
     showUserModal = true;
   }
 
-  /* =========================
-     SAVE USER
-  ========================= */
+  function openEditUserModal(user: User) {
+    if (!isAdmin) {
+      showToast("❌ Hanya admin yang dapat mengedit user.", true);
+      return;
+    }
+
+    editingUserId = user.id;
+    formFullName = user.full_name || "";
+    formUsername = user.username || "";
+    formEmail = user.email || "";
+    formPassword = "";
+    formConfirmPassword = "";
+    formRole = user.role;
+    showUserModal = true;
+  }
 
   async function saveUser() {
-
     if (!isAdmin) {
+      showToast("❌ Hanya admin yang dapat menyimpan user.", true);
       return;
     }
 
-    if (
-      !formUsername.trim()
-    ) {
+    if (isSavingUser) return;
 
-      showToast(
-        "Nama user wajib diisi!",
-        true
-      );
+    const full_name = formFullName.trim();
+    const username = formUsername.trim();
+    const email = formEmail.trim().toLowerCase();
+    const password = formPassword;
+    const confirmPassword = formConfirmPassword;
 
+    if (!full_name || !username || !email) {
+      showToast("❌ Nama lengkap, username, dan email wajib diisi.", true);
       return;
     }
 
-    if (
-      editingUserId !== null
-    ) {
-
-      const {
-        error
-      } = await supabase
-        .from("users")
-        .update({
-          username:
-            formUsername.trim(),
-
-          role:
-            formRole
-        })
-        .eq(
-          "id",
-          editingUserId
-        );
-
-      if (error) {
-
-        showToast(
-          "Gagal memperbarui user: " +
-            error.message,
-          true
-        );
-
-        return;
-      }
-
-      showToast(
-        "✓ User berhasil diperbarui!"
-      );
-
-    } else {
-
-      const {
-        error
-      } = await supabase
-        .from("users")
-        .insert([
-          {
-            username:
-              formUsername.trim(),
-
-            role:
-              formRole
-          }
-        ]);
-
-      if (error) {
-
-        showToast(
-          "Gagal menambah user: " +
-            error.message,
-          true
-        );
-
-        return;
-      }
-
-      showToast(
-        "✓ User berhasil ditambahkan!"
-      );
+    if (username.length < 3) {
+      showToast("❌ Username minimal 3 karakter.", true);
+      return;
     }
 
-    showUserModal = false;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showToast("❌ Format email tidak valid.", true);
+      return;
+    }
 
-    await loadUsers();
+    if (editingUserId === null && !password) {
+      showToast("❌ Password wajib diisi.", true);
+      return;
+    }
+
+    if (password && password.length < 6) {
+      showToast("❌ Password minimal 6 karakter.", true);
+      return;
+    }
+
+    if (password && password !== confirmPassword) {
+      showToast("❌ Konfirmasi password tidak sama.", true);
+      return;
+    }
+
+    isSavingUser = true;
+
+    try {
+      let usernameQuery = supabase
+        .from("users")
+        .select("id")
+        .ilike("username", username);
+
+      let emailQuery = supabase
+        .from("users")
+        .select("id")
+        .ilike("email", email);
+
+      if (editingUserId !== null) {
+        usernameQuery = usernameQuery.neq("id", editingUserId);
+        emailQuery = emailQuery.neq("id", editingUserId);
+      }
+
+      const [usernameResult, emailResult] = await Promise.all([
+        usernameQuery,
+        emailQuery
+      ]);
+
+      if (usernameResult.error) throw usernameResult.error;
+      if (emailResult.error) throw emailResult.error;
+
+      if ((usernameResult.data || []).length > 0) {
+        showToast("❌ Username sudah digunakan.", true);
+        return;
+      }
+
+      if ((emailResult.data || []).length > 0) {
+        showToast("❌ Email sudah digunakan.", true);
+        return;
+      }
+
+      if (editingUserId !== null) {
+        const payload: Record<string, string> = {
+          full_name,
+          username,
+          email,
+          role: formRole
+        };
+
+        if (password) {
+          payload.password_hash = btoa(password);
+        }
+
+        const { error } = await supabase
+          .from("users")
+          .update(payload)
+          .eq("id", editingUserId);
+
+        if (error) throw error;
+        showToast(`✓ User "${username}" berhasil diperbarui!`);
+      } else {
+        const password_hash = btoa(password);
+
+        const { error } = await supabase
+          .from("users")
+          .insert([{
+            full_name,
+            username,
+            email,
+            password_hash,
+            role: formRole
+          }]);
+
+        if (error) throw error;
+        showToast(`✓ User "${username}" berhasil ditambahkan!`);
+      }
+
+      showUserModal = false;
+      resetUserForm();
+      await loadUsers();
+
+    } catch (error: any) {
+      console.error("Gagal menyimpan user:", error);
+
+      const errorMessage = error?.message || "Terjadi kesalahan.";
+
+      if (errorMessage.includes("duplicate key")) {
+        if (errorMessage.includes("email")) {
+          showToast("❌ Email sudah digunakan.", true);
+        } else {
+          showToast("❌ Username sudah digunakan.", true);
+        }
+      } else {
+        showToast("❌ Gagal menyimpan user: " + errorMessage, true);
+      }
+    } finally {
+      isSavingUser = false;
+    }
   }
 
   /* =========================
      DELETE USER
   ========================= */
+async function deleteUser(
+  id: number,
+  username: string
+) {
+  if (!isAdmin) {
+    showToast(
+      "❌ Hanya admin yang dapat menghapus user.",
+      true
+    );
+    return;
+  }
 
-  async function deleteUser(
-    id: number,
-    username: string
-  ) {
+  if (currentUser?.id === id) {
+    showToast(
+      "❌ Anda tidak dapat menghapus akun sendiri.",
+      true
+    );
+    return;
+  }
 
-    if (!isAdmin) {
-      return;
-    }
+  const confirmed = confirm(
+    `Apakah Anda yakin ingin menghapus user "${username}"?`
+  );
 
-    const confirmed =
-      confirm(
-        `Hapus user "${username}"?`
-      );
+  if (!confirmed) return;
 
-    if (!confirmed) {
-      return;
-    }
+  try {
+    // Hapus data yang berhubungan dengan user
+    await supabase
+      .from("attendance")
+      .delete()
+      .eq("user_id", id);
 
-    const {
-      error
-    } = await supabase
+    await supabase
+      .from("spp_payments")
+      .delete()
+      .eq("user_id", id);
+
+    await supabase
+      .from("entries")
+      .delete()
+      .eq("user_id", id);
+
+    await supabase
+      .from("schedules")
+      .update({ teacher_id: null })
+      .eq("teacher_id", id);
+
+    await supabase
+      .from("announcements")
+      .update({ created_by: null })
+      .eq("created_by", id);
+
+    // Hapus user
+    const { error } = await supabase
       .from("users")
       .delete()
-      .eq(
-        "id",
-        id
-      );
+      .eq("id", id);
 
-    if (error) {
-
-      showToast(
-        "Gagal menghapus user: " +
-          error.message,
-        true
-      );
-
-      return;
-    }
+    if (error) throw error;
 
     showToast(
-      "✓ User berhasil dihapus!"
+      `✓ User "${username}" berhasil dihapus!`
     );
 
     await Promise.all([
       loadUsers(),
       loadSPPData(),
       loadAttendance(),
-      loadSchedules()
+      loadSchedules(),
+      loadAnnouncements()
     ]);
+
+  } catch (error: any) {
+    console.error("Gagal menghapus user:", error);
+
+    showToast(
+      "❌ Gagal menghapus user: " +
+      (error?.message || "Terjadi kesalahan."),
+      true
+    );
   }
+}
 
   /* =========================
      LOAD ATTENDANCE
@@ -1105,163 +1243,93 @@
      ADD SCHEDULE
   ========================= */
 
+  function createEmptyScheduleItem(): ScheduleFormItem {
+    return { class_name: "", subject: "None", teacher_id: "", time: "" };
+  }
+
+  function addScheduleItem() {
+    scheduleItems = [...scheduleItems, createEmptyScheduleItem()];
+  }
+
+  function removeScheduleItem(index: number) {
+    if (scheduleItems.length === 1) {
+      showToast("Minimal harus ada satu jadwal!", true);
+      return;
+    }
+    scheduleItems = scheduleItems.filter((_, i) => i !== index);
+  }
+
   function openAddSchedule() {
-
     if (!isAdmin) {
-
-      showToast(
-        "Hanya admin yang dapat menambah jadwal.",
-        true
-      );
-
+      showToast("Hanya admin yang dapat menambah jadwal.", true);
       return;
     }
-
     editingScheduleId = null;
-
     scheduleDay = "";
-    scheduleSubject = "";
-    scheduleTeacherId = "";
-    scheduleTime = "";
-
+    scheduleItems = [createEmptyScheduleItem()];
     showScheduleModal = true;
   }
 
-  /* =========================
-     EDIT SCHEDULE
-  ========================= */
-
-  function openEditSchedule(
-    schedule: Schedule
-  ) {
-
-    if (!isAdmin) {
-      return;
-    }
-
-    editingScheduleId =
-      schedule.id || null;
-
-    scheduleDay =
-      schedule.day;
-
-    scheduleSubject =
-      schedule.subject;
-
-    scheduleTeacherId =
-      schedule.teacher_id
-        ? String(
-            schedule.teacher_id
-          )
-        : "";
-
-    scheduleTime =
-      schedule.time;
-
+  function openEditSchedule(schedule: Schedule) {
+    if (!isAdmin) return;
+    editingScheduleId = schedule.id || null;
+    scheduleDay = schedule.day;
+    scheduleItems = [{
+      class_name: schedule.class_name || "",
+      subject: schedule.subject || "None",
+      teacher_id: schedule.teacher_id ? String(schedule.teacher_id) : "",
+      time: schedule.time || ""
+    }];
     showScheduleModal = true;
   }
-
-  /* =========================
-     SAVE SCHEDULE
-  ========================= */
 
   async function saveSchedule() {
-
-    if (!isAdmin) {
+    if (!isAdmin) return;
+    if (!scheduleDay) {
+      showToast("Pilih hari terlebih dahulu!", true);
       return;
     }
 
-    if (
-      !scheduleDay ||
-      !scheduleSubject ||
-      !scheduleTeacherId ||
-      !scheduleTime
-    ) {
-
-      showToast(
-        "Semua data jadwal wajib diisi!",
-        true
-      );
-
-      return;
-    }
-
-    const payload = {
-
-      day:
-        scheduleDay,
-
-      subject:
-        scheduleSubject,
-
-      teacher_id:
-        Number(
-          scheduleTeacherId
-        ),
-
-      time:
-        scheduleTime
-    };
-
-    if (
-      editingScheduleId !== null
-    ) {
-
-      const {
-        error
-      } = await supabase
-        .from("schedules")
-        .update(
-          payload
-        )
-        .eq(
-          "id",
-          editingScheduleId
-        );
-
-      if (error) {
-
-        showToast(
-          "Gagal mengedit jadwal: " +
-            error.message,
-          true
-        );
-
+    for (const item of scheduleItems) {
+      if (!item.class_name || !item.teacher_id || !item.time) {
+        showToast("Kelas, ustad, dan jam wajib diisi pada semua kelompok jadwal!", true);
         return;
       }
+      const selectedTeacher = users.find(user => user.id === Number(item.teacher_id));
+      if (!selectedTeacher || selectedTeacher.role !== "ustad") {
+        showToast("Pengajar harus memiliki role Ustad!", true);
+        return;
+      }
+    }
 
-      showToast(
-        "✓ Jadwal berhasil diperbarui!"
-      );
+    const payload = scheduleItems.map(item => ({
+      day: scheduleDay,
+      class_name: item.class_name,
+      subject: item.subject || "None",
+      teacher_id: Number(item.teacher_id),
+      time: item.time
+    }));
 
+    if (editingScheduleId !== null) {
+      const { error } = await supabase.from("schedules").update(payload[0]).eq("id", editingScheduleId);
+      if (error) {
+        showToast("Gagal mengedit jadwal: " + error.message, true);
+        return;
+      }
+      showToast("✓ Jadwal berhasil diperbarui!");
     } else {
-
-      const {
-        error
-      } = await supabase
-        .from("schedules")
-        .insert([
-          payload
-        ]);
-
+      const { error } = await supabase.from("schedules").insert(payload);
       if (error) {
-
-        showToast(
-          "Gagal menambah jadwal: " +
-            error.message,
-          true
-        );
-
+        showToast("Gagal menambah jadwal: " + error.message, true);
         return;
       }
-
-      showToast(
-        "✓ Jadwal berhasil ditambahkan!"
-      );
+      showToast("✓ Semua jadwal berhasil ditambahkan!");
     }
 
     showScheduleModal = false;
-
+    editingScheduleId = null;
+    scheduleDay = "";
+    scheduleItems = [createEmptyScheduleItem()];
     await loadSchedules();
   }
 
@@ -1786,11 +1854,11 @@
       <div>
 
         <h2>
-          mySantri
+          Daarulhikam
         </h2>
 
         <p>
-          Daarulhikam Banking
+          Sistem Informasi Pesantren
         </p>
 
       </div>
@@ -2035,373 +2103,76 @@
 
       {#if activeView === "home"}
 
-        <div class="portal-grid">
+        <div class="portal-grid user-stats-grid">
 
-
-          <!-- SALDO -->
-
-          <div
-            class="bca-card saldo-card"
-          >
-
-            <div class="card-top-row">
-
-              <span class="card-label">
-                Total Saldo
-              </span>
-
-
-              <span class="badge-brand">
-                mySantri
-              </span>
-
+          <button type="button" class="bca-card user-stat-card clickable-stat-card" on:click={() => openRoleModal("santri")}>
+            <div class="user-stat-icon">👤</div>
+            <div class="user-stat-content">
+              <span>Jumlah Santri</span>
+              <strong>{santriUsers.length}</strong>
             </div>
+          </button>
 
-
-            <div
-              class="card-main-balance"
-            >
-
-              Rp
-              {formatRupiah(
-                totalSaldo
-              )}
-
+          <button type="button" class="bca-card user-stat-card clickable-stat-card" on:click={() => openRoleModal("ustad")}>
+            <div class="user-stat-icon">👨‍🏫</div>
+            <div class="user-stat-content">
+              <span>Jumlah Ustad</span>
+              <strong>{ustadUsers.length}</strong>
             </div>
+          </button>
 
-
-            <div
-              class="card-footer-info"
-            >
-
-              <span>
-                Saldo seluruh transaksi
-              </span>
-
+          <button type="button" class="bca-card user-stat-card clickable-stat-card" on:click={() => openRoleModal("admin")}>
+            <div class="user-stat-icon">🛡️</div>
+            <div class="user-stat-content">
+              <span>Jumlah Admin</span>
+              <strong>{adminUsers.length}</strong>
             </div>
-
-          </div>
-
-
-          <!-- SUMMARY -->
-
-          <div
-            class="bca-card summary-card"
-          >
-
-            <h3
-              class="box-title"
-            >
-              Ringkasan Keuangan
-            </h3>
-
-
-            <div
-              class="summary-pills-row"
-            >
-
-              <div
-                class="summary-pill green"
-              >
-
-                <span
-                  class="pill-title"
-                >
-                  Total Pemasukan
-                </span>
-
-
-                <span
-                  class="pill-value"
-                >
-                  +
-                  Rp
-                  {formatRupiah(
-                    totalPemasukan
-                  )}
-                </span>
-
-              </div>
-
-
-              <div
-                class="summary-pill red"
-              >
-
-                <span
-                  class="pill-title"
-                >
-                  Total Pengeluaran
-                </span>
-
-
-                <span
-                  class="pill-value"
-                >
-                  -
-                  Rp
-                  {formatRupiah(
-                    totalPengeluaran
-                  )}
-                </span>
-
-              </div>
-
-            </div>
-
-          </div>
+          </button>
 
         </div>
 
 
-        <!-- SECONDARY -->
+        <div class="portal-grid-secondary">
 
-        <div
-          class="portal-grid-secondary"
-        >
+          <div class="bca-card services-card">
 
-
-          <!-- SERVICES -->
-
-          <div
-            class="bca-card services-card"
-          >
-
-            <h3
-              class="box-title"
-            >
+            <h3 class="box-title">
               Layanan Utama
             </h3>
 
+            <div class="services-grid">
 
-            <div
-              class="services-grid"
-            >
-
-              <button
-                class="service-item"
-                on:click={() =>
-                  changeView("spp")}
-              >
-
-                <div
-                  class="s-icon blue"
-                >
-                  💳
-                </div>
-
-                <span>
-                  SPP
-                </span>
-
+              <button class="service-item" on:click={() => changeView("spp")}>
+                <div class="s-icon blue">💳</div>
+                <span>SPP</span>
               </button>
 
-
-              <button
-                class="service-item"
-                on:click={() =>
-                  changeView("attendance")}
-              >
-
-                <div
-                  class="s-icon red"
-                >
-                  📅
-                </div>
-
-                <span>
-                  Absensi
-                </span>
-
+              <button class="service-item" on:click={() => changeView("attendance")}>
+                <div class="s-icon red">📅</div>
+                <span>Absensi</span>
               </button>
 
-
-              <button
-                class="service-item"
-                on:click={() =>
-                  changeView("schedule")}
-              >
-
-                <div
-                  class="s-icon purple"
-                >
-                  🗓️
-                </div>
-
-                <span>
-                  Jadwal
-                </span>
-
+              <button class="service-item" on:click={() => changeView("schedule")}>
+                <div class="s-icon purple">🗓️</div>
+                <span>Jadwal</span>
               </button>
 
-
-              <button
-                class="service-item"
-                on:click={() =>
-                  changeView("announcement")}
-              >
-
-                <div
-                  class="s-icon orange"
-                >
-                  📢
-                </div>
-
-                <span>
-                  Pengumuman
-                </span>
-
+              <button class="service-item" on:click={() => changeView("announcement")}>
+                <div class="s-icon orange">📢</div>
+                <span>Pengumuman</span>
               </button>
-
 
               {#if isAdmin}
-
-                <button
-                  class="service-item"
-                  on:click={() =>
-                    changeView("users")}
-                >
-
-                  <div
-                    class="s-icon cyan"
-                  >
-                    👥
-                  </div>
-
-                  <span>
-                    Kelola User
-                  </span>
-
+                <button class="service-item" on:click={() => changeView("users")}>
+                  <div class="s-icon cyan">👥</div>
+                  <span>Kelola User</span>
                 </button>
-
-
-                <button
-                  class="service-item"
-                  on:click={() =>
-                    changeView("topup")}
-                >
-
-                  <div
-                    class="s-icon green"
-                  >
-                    ➕
-                  </div>
-
-                  <span>
-                    Top Up
-                  </span>
-
-                </button>
-
               {/if}
 
-
-              <button
-                class="service-item"
-                on:click={() =>
-                  changeView("barcode")}
-              >
-
-                <div
-                  class="s-icon blue"
-                >
-                  🆔
-                </div>
-
-                <span>
-                  Barcode
-                </span>
-
+              <button class="service-item" on:click={() => changeView("barcode")}>
+                <div class="s-icon blue">🆔</div>
+                <span>Barcode</span>
               </button>
-
-            </div>
-
-          </div>
-
-
-          <!-- TRANSACTION -->
-
-          <div
-            class="bca-card transactions-card"
-          >
-
-            <h3
-              class="box-title"
-            >
-              Transaksi Terakhir
-            </h3>
-
-
-            <div
-              class="transaction-list"
-            >
-
-              {#if entries.length === 0}
-
-                <p
-                  class="empty-cell"
-                >
-                  Belum ada transaksi.
-                </p>
-
-              {:else}
-
-                {#each entries.slice(0, 5) as entry}
-
-                  <div
-                    class="trx-item"
-                  >
-
-                    <div
-                      class="trx-icon-wrapper {entry.kind}"
-                    >
-
-                      {entry.kind ===
-                      "pemasukan"
-                        ? "↓"
-                        : "↑"}
-
-                    </div>
-
-
-                    <div
-                      class="trx-details"
-                    >
-
-                      <strong>
-                        {entry.name}
-                      </strong>
-
-
-                      <small>
-                        {entry.date}
-                      </small>
-
-                    </div>
-
-
-                    <div
-                      class="trx-amount {entry.kind}"
-                    >
-
-                      {entry.kind ===
-                      "pemasukan"
-                        ? "+"
-                        : "-"}
-
-                      Rp
-
-                      {formatRupiah(
-                        entry.amount
-                      )}
-
-                    </div>
-
-                  </div>
-
-                {/each}
-
-              {/if}
 
             </div>
 
@@ -2410,15 +2181,9 @@
         </div>
 
 
-        <!-- ANNOUNCEMENT HOME -->
+        <div class="bca-card home-announcement-card">
 
-        <div
-          class="bca-card home-announcement-card"
-        >
-
-          <div
-            class="sub-header-row"
-          >
+          <div class="sub-header-row">
 
             <div>
 
@@ -2426,19 +2191,15 @@
                 📢 Pengumuman Terbaru
               </h3>
 
-              <p
-                class="sub-description"
-              >
+              <p class="sub-description">
                 Informasi terbaru dari admin.
               </p>
 
             </div>
 
-
             <button
               class="btn-back"
-              on:click={() =>
-                changeView("announcement")}
+              on:click={() => changeView("announcement")}
             >
               Lihat Semua →
             </button>
@@ -2448,53 +2209,36 @@
 
           {#if announcements.length === 0}
 
-            <p
-              class="empty-cell"
-            >
+            <p class="empty-cell">
               Belum ada pengumuman.
             </p>
 
           {:else}
 
-            <div
-              class="home-announcement-list"
-            >
+            <div class="home-announcement-list">
 
               {#each announcements.slice(0, 3) as announcement}
 
-                <div
-                  class="home-announcement-item"
-                >
+                <div class="home-announcement-item">
 
                   <div>
 
                     <strong>
-                      📢
-                      {announcement.title}
+                      📢 {announcement.title}
                     </strong>
 
                     <p>
-
                       {
                         announcement.content.length > 120
-                          ? announcement.content.slice(
-                              0,
-                              120
-                            ) + "..."
+                          ? announcement.content.slice(0, 120) + "..."
                           : announcement.content
                       }
-
                     </p>
 
                   </div>
 
-
                   <small>
-                    {
-                      formatDate(
-                        announcement.created_at
-                      )
-                    }
+                    {formatDate(announcement.created_at)}
                   </small>
 
                 </div>
@@ -2508,11 +2252,7 @@
         </div>
 
 
-      <!-- =========================
-           SPP
-      ========================= -->
-
-      {:else if activeView === "spp"}
+{:else if activeView === "spp"}
 
         <div
           class="bca-card sub-view-container"
@@ -2921,28 +2661,23 @@
                       >
 
                         <button
-                          class="btn-icon"
-                          title="Edit"
-                          on:click={() =>
-                            openEditUserModal(
-                              user
-                            )}
-                        >
-                          ✏️
-                        </button>
+  class="btn-icon"
+  title="Edit"
+  on:click={() => openEditUserModal(user)}
+>
+  ✏️
+</button>
 
-
-                        <button
-                          class="btn-icon danger"
-                          title="Hapus"
-                          on:click={() =>
-                            deleteUser(
-                              user.id,
-                              user.username
-                            )}
-                        >
-                          🗑️
-                        </button>
+<button
+  class="btn-icon danger"
+  title="Hapus"
+  on:click={() => deleteUser(
+    user.id,
+    user.username
+  )}
+>
+  🗑️
+</button>
 
                       </div>
 
@@ -3303,219 +3038,52 @@
       ========================= -->
 
       {:else if activeView === "schedule"}
-
-        <div
-          class="bca-card sub-view-container"
-        >
-
-          <div
-            class="sub-header-row"
-          >
-
+        <div class="bca-card sub-view-container">
+          <div class="sub-header-row">
             <div>
-
-              <h3>
-                🗓️ Jadwal & Pengajar
-              </h3>
-
-              <p
-                class="sub-description"
-              >
-                Lihat jadwal dan siapa
-                yang mengajar.
-              </p>
-
+              <h3>🗓️ Jadwal & Pengajar</h3>
+              <p class="sub-description">Jadwal dikelompokkan berdasarkan hari. Satu hari dapat berisi banyak kelas, mata pelajaran, dan ustad.</p>
             </div>
-
-
-            <div
-              class="action-group-top"
-            >
-
-              {#if isAdmin}
-
-                <button
-                  class="btn-primary"
-                  on:click={
-                    openAddSchedule
-                  }
-                >
-                  ➕ Tambah Jadwal
-                </button>
-
-              {/if}
-
-
-              <button
-                class="btn-back"
-                on:click={() =>
-                  changeView("home")}
-              >
-                ← Kembali
-              </button>
-
+            <div class="action-group-top">
+              {#if isAdmin}<button class="btn-primary" on:click={openAddSchedule}>➕ Tambah Jadwal Hari</button>{/if}
+              <button class="btn-back" on:click={() => changeView("home")}>← Kembali</button>
             </div>
-
           </div>
 
-
-          <div
-            class="table-responsive"
-          >
-
-            <table
-              class="data-table"
-            >
-
-              <thead>
-
-                <tr>
-
-                  <th>
-                    Hari
-                  </th>
-
-                  <th>
-                    Mata Pelajaran
-                  </th>
-
-                  <th>
-                    Pengajar
-                  </th>
-
-                  <th>
-                    Jam
-                  </th>
-
-                  {#if isAdmin}
-
-                    <th>
-                      Aksi
-                    </th>
-
-                  {/if}
-
-                </tr>
-
-              </thead>
-
-
-              <tbody>
-
-                {#if schedules.length === 0}
-
-                  <tr>
-
-                    <td
-                      colspan={
-                        isAdmin
-                          ? 5
-                          : 4
-                      }
-                      class="empty-cell"
-                    >
-
-                      Belum ada jadwal.
-
-                    </td>
-
-                  </tr>
-
-                {:else}
-
-                  {#each schedules as schedule}
-
-                    <tr>
-
-                      <td>
-                        {schedule.day}
-                      </td>
-
-
-                      <td>
-
-                        <strong>
-                          {schedule.subject}
-                        </strong>
-
-                      </td>
-
-
-                      <td>
-
-                        <div
-                          class="teacher-cell"
-                        >
-
-                          👨‍🏫
-
-                          {
-                            getTeacherName(
-                              schedule.teacher_id
-                            )
-                          }
-
-                        </div>
-
-                      </td>
-
-
-                      <td>
-                        {schedule.time}
-                      </td>
-
-
-                      {#if isAdmin}
-
-                        <td>
-
-                          <div
-                            class="action-buttons"
-                          >
-
-                            <button
-                              class="btn-icon"
-                              on:click={() =>
-                                openEditSchedule(
-                                  schedule
-                                )}
-                            >
-                              ✏️
-                            </button>
-
-
-                            {#if schedule.id}
-
-                              <button
-                                class="btn-icon danger"
-                                on:click={() =>
-                                  deleteSchedule(
-                                    schedule.id
-                                  )}
-                              >
-                                🗑️
-                              </button>
-
-                            {/if}
-
-                          </div>
-
-                        </td>
-
-                      {/if}
-
-                    </tr>
-
-                  {/each}
-
+          {#if schedules.length === 0}
+            <p class="empty-cell">Belum ada jadwal.</p>
+          {:else}
+            <div class="schedule-day-list">
+              {#each schedulesByDay as dayGroup}
+                {#if dayGroup.items.length > 0}
+                  <div class="schedule-day-card">
+                    <div class="schedule-day-title">📅 {dayGroup.day}</div>
+                    <div class="table-responsive">
+                      <table class="data-table">
+                        <thead><tr><th>Kelas</th><th>Mata Pelajaran</th><th>Pengajar</th><th>Jam</th>{#if isAdmin}<th>Aksi</th>{/if}</tr></thead>
+                        <tbody>
+                          {#each dayGroup.items as schedule}
+                            <tr>
+                              <td><span class="class-badge">🏫 {schedule.class_name || "Belum ditentukan"}</span></td>
+                              <td>{#if schedule.subject === "None"}<span class="subject-none">Tidak ada</span>{:else}<strong>{schedule.subject}</strong>{/if}</td>
+                              <td><div class="teacher-cell">👨‍🏫 {getTeacherName(schedule.teacher_id)}</div></td>
+                              <td>🕒 {schedule.time}</td>
+                              {#if isAdmin}
+                                <td><div class="action-buttons">
+                                  <button class="btn-icon" title="Edit" on:click={() => openEditSchedule(schedule)}>✏️</button>
+                                  {#if schedule.id}<button class="btn-icon danger" title="Hapus" on:click={() => deleteSchedule(schedule.id)}>🗑️</button>{/if}
+                                </div></td>
+                              {/if}
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 {/if}
-
-              </tbody>
-
-            </table>
-
-          </div>
-
+              {/each}
+            </div>
+          {/if}
         </div>
 
 
@@ -3971,324 +3539,150 @@
 ========================= -->
 
 {#if showUserModal}
-
-  <div
-    class="modal-backdrop"
-    on:click={() =>
-      showUserModal = false}
-  >
-
-    <div
-      class="modal-card"
-      on:click|stopPropagation
-    >
-
-      <div
-        class="modal-header"
-      >
-
-        <h3>
-
-          {
-            editingUserId !== null
-              ? "Edit User"
-              : "Tambah User"
-          }
-
-        </h3>
-
-
-        <button
-          class="btn-close-modal"
-          on:click={() =>
-            showUserModal =
-              false}
-        >
-          ✕
-        </button>
-
+  <div class="modal-backdrop" role="presentation" on:click={() => { if (!isSavingUser) showUserModal = false; }}>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="user-modal-title" on:click|stopPropagation>
+      <div class="modal-header">
+        <div>
+          <h3 id="user-modal-title">{editingUserId !== null ? "✏️ Edit User" : "➕ Tambah User"}</h3>
+          <p class="modal-subtitle">{editingUserId !== null ? "Perbarui data akun user." : "Tambahkan akun user baru seperti registrasi."}</p>
+        </div>
+        <button type="button" class="btn-close-modal" aria-label="Tutup" disabled={isSavingUser} on:click={() => showUserModal = false}>✕</button>
       </div>
 
-
-      <div
-        class="form-group-modal"
-      >
-
-        <label>
-          Nama
-        </label>
-
-        <input
-          type="text"
-          placeholder="Masukkan nama..."
-          bind:value={
-            formUsername
-          }
-        />
-
+      <div class="form-group-modal">
+        <label for="user-full-name">Nama Lengkap</label>
+        <input id="user-full-name" type="text" placeholder="Masukkan nama lengkap" bind:value={formFullName} disabled={isSavingUser} />
       </div>
 
+      <div class="form-group-modal">
+        <label for="user-username">Username</label>
+        <input id="user-username" type="text" placeholder="Masukkan username" bind:value={formUsername} disabled={isSavingUser} />
+      </div>
 
-      <div
-        class="form-group-modal"
-      >
+      <div class="form-group-modal">
+        <label for="user-email">Email</label>
+        <input id="user-email" type="email" placeholder="Masukkan email" bind:value={formEmail} disabled={isSavingUser} />
+      </div>
 
-        <label>
-          Role
-        </label>
+      <div class="form-group-modal">
+        <label for="user-password">{editingUserId !== null ? "Password Baru (opsional)" : "Password"}</label>
+        <input id="user-password" type="password" placeholder={editingUserId !== null ? "Kosongkan jika tidak ingin mengubah password" : "Minimal 6 karakter"} bind:value={formPassword} disabled={isSavingUser} />
+      </div>
 
-        <select
-          bind:value={
-            formRole
-          }
-        >
+      <div class="form-group-modal">
+        <label for="user-confirm-password">Konfirmasi Password</label>
+        <input id="user-confirm-password" type="password" placeholder="Ulangi password" bind:value={formConfirmPassword} disabled={isSavingUser} on:keydown={(event) => { if (event.key === "Enter") saveUser(); }} />
+      </div>
 
-          <option value="santri">
-            Santri
-          </option>
-
-          <option value="ustad">
-            Ustad / Pengajar
-          </option>
-
-          <option value="admin">
-            Admin
-          </option>
-
+      <div class="form-group-modal">
+        <label for="user-role">Role</label>
+        <select id="user-role" bind:value={formRole} disabled={isSavingUser}>
+          <option value="santri">Santri</option>
+          <option value="ustad">Ustad / Pengajar</option>
+          <option value="admin">Admin</option>
         </select>
-
       </div>
 
-
-      <div
-        class="modal-footer"
-      >
-
-        <button
-          class="btn-secondary"
-          on:click={() =>
-            showUserModal =
-              false}
-        >
-          Batal
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" disabled={isSavingUser} on:click={() => showUserModal = false}>Batal</button>
+        <button type="button" class="btn-primary" disabled={isSavingUser} on:click={saveUser}>
+          {#if isSavingUser}
+            ⏳ Menyimpan...
+          {:else if editingUserId !== null}
+            💾 Simpan Perubahan
+          {:else}
+            ➕ Tambah User
+          {/if}
         </button>
-
-
-        <button
-          class="btn-primary"
-          on:click={
-            saveUser
-          }
-        >
-          Simpan
-        </button>
-
       </div>
-
     </div>
-
   </div>
-
 {/if}
 
+<!-- =========================
+     ROLE DETAIL MODAL
+========================= -->
+
+{#if showRoleModal}
+  <div class="modal-backdrop role-modal-backdrop" role="presentation" on:click={closeRoleModal}>
+    <div class="modal-card role-modal-card" role="dialog" aria-modal="true" aria-label={`Daftar ${getRoleLabel(selectedRole)}`} on:click|stopPropagation>
+      <div class="modal-header">
+        <div>
+          <h3>👥 Daftar {getRoleLabel(selectedRole)}</h3>
+          <p class="modal-subtitle">Total {roleUsers.length} {getRoleLabel(selectedRole)}</p>
+        </div>
+        <button type="button" class="btn-close-modal" aria-label="Tutup" on:click={closeRoleModal}>✕</button>
+      </div>
+
+      <div class="role-user-list">
+        {#if roleUsers.length === 0}
+          <div class="empty-role-list">Belum ada data {getRoleLabel(selectedRole)}.</div>
+        {:else}
+          {#each roleUsers as user}
+            <div class="role-user-item">
+              <span class="user-avatar">{user.username.charAt(0).toUpperCase()}</span>
+              <div class="role-user-info">
+                <strong>{user.full_name || user.username}</strong>
+                <span>@{user.username}</span>
+                <small>{user.email}</small>
+              </div>
+              <span class={`role-badge ${user.role}`}>{user.role}</span>
+            </div>
+          {/each}
+        {/if}
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" on:click={closeRoleModal}>Tutup</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- =========================
      SCHEDULE MODAL
 ========================= -->
 
 {#if showScheduleModal}
-
-  <div
-    class="modal-backdrop"
-    on:click={() =>
-      showScheduleModal =
-        false}
-  >
-
-    <div
-      class="modal-card"
-      on:click|stopPropagation
-    >
-
-      <div
-        class="modal-header"
-      >
-
-        <h3>
-
-          {
-            editingScheduleId !== null
-              ? "Edit Jadwal"
-              : "Tambah Jadwal"
-          }
-
-        </h3>
-
-
-        <button
-          class="btn-close-modal"
-          on:click={() =>
-            showScheduleModal =
-              false}
-        >
-          ✕
-        </button>
-
+  <div class="modal-backdrop" on:click={() => showScheduleModal = false}>
+    <div class="modal-card schedule-modal" on:click|stopPropagation>
+      <div class="modal-header">
+        <h3>{editingScheduleId !== null ? "✏️ Edit Jadwal" : "➕ Tambah Jadwal Per Hari"}</h3>
+        <button class="btn-close-modal" on:click={() => showScheduleModal = false}>✕</button>
       </div>
 
-
-      <div
-        class="form-group-modal"
-      >
-
-        <label>
-          Hari
-        </label>
-
-        <select
-          bind:value={
-            scheduleDay
-          }
-        >
-
-          <option value="">
-            Pilih Hari
-          </option>
-
-          <option value="Senin">
-            Senin
-          </option>
-
-          <option value="Selasa">
-            Selasa
-          </option>
-
-          <option value="Rabu">
-            Rabu
-          </option>
-
-          <option value="Kamis">
-            Kamis
-          </option>
-
-          <option value="Jumat">
-            Jumat
-          </option>
-
-          <option value="Sabtu">
-            Sabtu
-          </option>
-
-          <option value="Minggu">
-            Minggu
-          </option>
-
-        </select>
-
+      <div class="form-group-modal">
+        <label>📅 Hari</label>
+        <select bind:value={scheduleDay}><option value="">Pilih Hari</option>{#each dayOptions as day}<option value={day}>{day}</option>{/each}</select>
       </div>
 
+      {#each scheduleItems as item, index}
+        <div class="schedule-item-box">
+          <div class="schedule-item-header">
+            <strong>Kelompok Jadwal {index + 1}</strong>
+            {#if editingScheduleId === null && scheduleItems.length > 1}<button type="button" class="btn-remove-schedule" on:click={() => removeScheduleItem(index)}>🗑️ Hapus</button>{/if}
+          </div>
+          <div class="form-group-modal"><label>🏫 Kelas</label><select bind:value={item.class_name}><option value="">Pilih Kelas</option>{#each classOptions as className}<option value={className}>{className}</option>{/each}</select></div>
+          <div class="form-group-modal"><label>📚 Mata Pelajaran</label><select bind:value={item.subject}>{#each subjectOptions as subject}<option value={subject}>{subject === "None" ? "None / Tidak Ada" : subject}</option>{/each}</select></div>
+          <div class="form-group-modal">
+            <label>👨‍🏫 Ustad Pengajar</label>
+            <select bind:value={item.teacher_id}>
+              <option value="">Pilih Ustad</option>
+              {#if ustadUsers.length === 0}<option disabled value="">Belum ada user dengan role Ustad</option>{:else}{#each ustadUsers as ustad}<option value={ustad.id}>{ustad.full_name || ustad.username}</option>{/each}{/if}
+            </select>
+            <small class="form-hint">Hanya user dengan role Ustad yang dapat dipilih.</small>
+          </div>
+          <div class="form-group-modal"><label>🕒 Jam</label><input type="text" placeholder="Contoh: 08:00 - 09:00" bind:value={item.time} /></div>
+        </div>
+      {/each}
 
-      <div
-        class="form-group-modal"
-      >
-
-        <label>
-          Mata Pelajaran
-        </label>
-
-        <input
-          type="text"
-          placeholder="Contoh: Tahfidz"
-          bind:value={
-            scheduleSubject
-          }
-        />
-
+      {#if editingScheduleId === null}<button type="button" class="btn-add-schedule-item" on:click={addScheduleItem}>➕ Tambah Kelompok Jadwal / Ustad</button>{/if}
+      <div class="modal-footer">
+        <button class="btn-secondary" on:click={() => showScheduleModal = false}>Batal</button>
+        <button class="btn-primary" on:click={saveSchedule}>💾 {editingScheduleId !== null ? "Simpan Perubahan" : "Simpan Semua Jadwal"}</button>
       </div>
-
-
-      <div
-        class="form-group-modal"
-      >
-
-        <label>
-          Pengajar
-        </label>
-
-        <select
-          bind:value={
-            scheduleTeacherId
-          }
-        >
-
-          <option value="">
-            Pilih Pengajar
-          </option>
-
-
-          {#each ustadUsers as ustad}
-
-            <option
-              value={ustad.id}
-            >
-              {ustad.username}
-            </option>
-
-          {/each}
-
-        </select>
-
-      </div>
-
-
-      <div
-        class="form-group-modal"
-      >
-
-        <label>
-          Jam
-        </label>
-
-        <input
-          type="text"
-          placeholder="Contoh: 08:00 - 09:00"
-          bind:value={
-            scheduleTime
-          }
-        />
-
-      </div>
-
-
-      <div
-        class="modal-footer"
-      >
-
-        <button
-          class="btn-secondary"
-          on:click={() =>
-            showScheduleModal =
-              false}
-        >
-          Batal
-        </button>
-
-
-        <button
-          class="btn-primary"
-          on:click={
-            saveSchedule
-          }
-        >
-          Simpan
-        </button>
-
-      </div>
-
     </div>
-
   </div>
-
 {/if}
 
 
@@ -7309,5 +6703,202 @@
     }
 
   }
+
+
+
+  /* =========================
+     HOME USER STATS
+  ========================= */
+
+  .user-stats-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .user-stat-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: 140px;
+    padding: 24px;
+  }
+
+  .user-stat-icon {
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 16px;
+    font-size: 28px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .user-stat-content {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .user-stat-content span {
+    font-size: 14px;
+    opacity: 0.85;
+  }
+
+  .user-stat-content strong {
+    font-size: 32px;
+    line-height: 1;
+  }
+
+  @media (max-width: 900px) {
+    .user-stats-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+
+  /* =========================
+     ROLE STAT MODAL
+  ========================= */
+
+  .clickable-stat-card {
+    border: none;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .clickable-stat-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.14);
+  }
+
+  .clickable-stat-card:focus-visible {
+    outline: 3px solid rgba(255, 255, 255, 0.8);
+    outline-offset: 3px;
+  }
+
+  .role-modal-card {
+    max-width: 620px;
+  }
+
+  .role-user-list {
+    max-height: 55vh;
+    overflow-y: auto;
+    padding: 12px 4px;
+  }
+
+  .role-user-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    margin: 10px 0;
+    border-radius: 14px;
+    background: #f7f9fc;
+    border: 1px solid #edf0f5;
+  }
+
+  .role-user-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .role-user-info strong,
+  .role-user-info span,
+  .role-user-info small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .role-user-info span {
+    color: #6b7280;
+    font-size: 13px;
+  }
+
+  .role-user-info small {
+    color: #9ca3af;
+    font-size: 12px;
+  }
+
+  .empty-role-list {
+    padding: 40px 20px;
+    text-align: center;
+    color: #6b7280;
+  }
+
+  @media (max-width: 600px) {
+    .role-user-item {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .role-user-info {
+      min-width: calc(100% - 60px);
+    }
+  }
+
+
+  /* =========================
+     SCHEDULE IMPROVEMENTS
+  ========================= */
+
+  .class-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: #eef4ff;
+    color: #2457a5;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .subject-none {
+    display: inline-block;
+    padding: 5px 10px;
+    border-radius: 8px;
+    background: #f1f1f1;
+    color: #888;
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  .form-hint {
+    display: block;
+    margin-top: 6px;
+    color: #888;
+    font-size: 12px;
+  }
+
+  .form-group-modal select {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    background: white;
+    font-size: 14px;
+    outline: none;
+  }
+
+  .form-group-modal select:focus {
+    border-color: #2463eb;
+  }
+  /* GROUPED SCHEDULE */
+  .schedule-modal { max-height: 90vh; overflow-y: auto; }
+  .schedule-item-box { margin-top: 16px; padding: 16px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; }
+  .schedule-item-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .btn-remove-schedule { border: none; padding: 8px 12px; border-radius: 8px; cursor: pointer; background: #fee2e2; color: #b91c1c; }
+  .btn-add-schedule-item { width: 100%; margin-top: 16px; padding: 12px; border: 1px dashed #2463eb; border-radius: 10px; background: #eff6ff; color: #2463eb; font-weight: 600; cursor: pointer; }
+  .schedule-day-list { display: grid; gap: 20px; }
+  .schedule-day-card { overflow: hidden; border: 1px solid #e5e7eb; border-radius: 14px; }
+  .schedule-day-title { padding: 14px 18px; background: #f3f4f6; font-size: 18px; font-weight: 700; }
 
 </style>
