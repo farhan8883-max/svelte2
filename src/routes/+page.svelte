@@ -29,11 +29,13 @@
     message = "Login berhasil!";
     localStorage.setItem("user", JSON.stringify(data));
 
-    if (data.role === "admin") {
-      goto("/dashboard");
-    } else {
-      goto("/santri");
-    }
+   if (data.role === "admin") {
+  goto("/dashboard");
+} else if (data.role === "ustad") {
+  goto("/ustad");
+} else {
+  goto("/santri");
+}
   }
 </script>
 
