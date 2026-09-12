@@ -11,7 +11,32 @@
   interface User {
     id: number;
     username: string;
+    full_name?: string | null;
     role: "admin" | "santri" | "ustad";
+    kelas?: string | null;
+    class_name?: string | null;
+    class_id?: number | null;
+  }
+
+  interface ClassRoom {
+    id: number;
+    name: string;
+  }
+
+  interface StudentGrade {
+    id?: number;
+    user_id: number;
+    class_id: number;
+    subject: string;
+    academic_year: string;
+    semester: number;
+    nilai_tugas: number | null;
+    nilai_ulangan_harian: number | null;
+    nilai_pts: number | null;
+    nilai_pas: number | null;
+    nilai_sikap_karakter: number | null;
+    nilai_ujian_sekolah: number | null;
+    nilai_akhir?: number | null;
   }
 
   interface Entry {
@@ -71,6 +96,7 @@
     | "users"
     | "attendance"
     | "schedule"
+    | "grades"
     | "barcode"
     | "topup"
     | "announcement";
@@ -116,6 +142,58 @@
   let announcements: Announcement[] = [];
 
   let sppData: Record<number, SPPRecord> = {};
+
+  /* =========================
+     GRADE / REKAP NILAI
+  ========================= */
+
+  let classes: ClassRoom[] = [];
+  let grades: StudentGrade[] = [];
+  let gradesLoading = false;
+  let gradeLoadError = "";
+
+  let gradeFilterClass = "";
+  let gradeFilterStudent = "";
+  let gradeFilterAcademicYear = `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`;
+  let gradeFilterSemester = "1";
+
+  let showGradeModal = false;
+  let editingGradeId: number | null = null;
+  let gradeClassId = "";
+  let gradeStudentId = "";
+  const subjectOptions = [
+    "Al-Qur'an Hadits",
+    "Aqidah Akhlak",
+    "Fiqih",
+    "Sejarah Kebudayaan Islam",
+    "Bahasa Arab",
+    "Bahasa Indonesia",
+    "Bahasa Inggris",
+    "Matematika",
+    "IPA",
+    "IPS",
+    "Pendidikan Pancasila",
+    "Informatika",
+    "Tahfidz",
+    "Olahraga"
+  ];
+  let gradeSubject = "";
+  let gradeAcademicYear = `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`;
+  let gradeSemester = "1";
+  let gradeTask: number | string = "";
+  let gradeDailyTest: number | string = "";
+  let gradePTS: number | string = "";
+  let gradePAS: number | string = "";
+  let gradeCharacter: number | string = "";
+  let gradeSchoolExam: number | string = "";
+
+  /* =========================
+     ASSIGN CLASS TO STUDENT
+  ========================= */
+
+  let showStudentClassModal = false;
+  let selectedStudentForClass = "";
+  let selectedClassForStudent = "";
 
   /* =========================
      DASHBOARD STATS
@@ -200,6 +278,25 @@
   let scheduleTeacherId = "";
   let scheduleTime = "";
 
+  // Urutan hari untuk tampilan jadwal per kelompok
+  const scheduleDays = [
+    "Senin",
+    "Selasa",
+    "Rabu",
+    "Kamis",
+    "Jumat",
+    "Sabtu",
+    "Minggu"
+  ];
+
+  // Kelompokkan jadwal berdasarkan hari dan urutkan berdasarkan jam
+  $: schedulesByDay = scheduleDays.map(day => ({
+    day,
+    schedules: schedules
+      .filter(schedule => schedule.day === day)
+      .sort((a, b) => a.time.localeCompare(b.time))
+  }));
+
   /* =========================
      ANNOUNCEMENT
   ========================= */
@@ -249,7 +346,9 @@
       loadSPPData(),
       loadAttendance(),
       loadSchedules(),
-      loadAnnouncements()
+      loadAnnouncements(),
+      loadClasses(),
+      loadGrades()
     ]);
   });
 
@@ -268,6 +367,31 @@
       user =>
         user.role === "ustad"
     );
+
+  $: unassignedSantri = santriUsers.filter(
+    user => !user.class_id
+  );
+
+
+  $: gradeStudents = santriUsers.filter(user =>
+    !gradeClassId || Number(user.class_id) === Number(gradeClassId)
+  );
+
+  $: filteredGradeStudents = santriUsers.filter(user =>
+    !gradeFilterClass || Number(user.class_id) === Number(gradeFilterClass)
+  );
+
+  $: filteredGrades = grades.filter(grade => {
+    // Role santri sudah difilter langsung di query Supabase dan tidak boleh
+    // tersembunyi oleh filter tahun/semester milik halaman admin/ustad.
+    if (currentUser?.role === "santri") return true;
+
+    if (gradeFilterClass && grade.class_id !== Number(gradeFilterClass)) return false;
+    if (gradeFilterStudent && grade.user_id !== Number(gradeFilterStudent)) return false;
+    if (gradeFilterAcademicYear && grade.academic_year !== gradeFilterAcademicYear) return false;
+    if (gradeFilterSemester && grade.semester !== Number(gradeFilterSemester)) return false;
+    return true;
+  });
 
   $: filteredSantri =
     santriUsers.filter(
@@ -292,6 +416,65 @@
     currentUser?.role === "ustad";
 
   /* =========================
+     ASSIGN CLASS TO SANTRI
+  ========================= */
+
+  function openStudentClassModal() {
+    if (currentUser?.role !== "admin" && currentUser?.role !== "ustad") {
+      showToast("Anda tidak memiliki akses untuk mengatur kelas santri.", true);
+      return;
+    }
+
+    selectedStudentForClass = "";
+    selectedClassForStudent = "";
+    showStudentClassModal = true;
+  }
+
+  async function saveStudentClass() {
+    if (currentUser?.role !== "admin" && currentUser?.role !== "ustad") {
+      showToast("Anda tidak memiliki akses untuk mengatur kelas santri.", true);
+      return;
+    }
+
+    if (!selectedStudentForClass || !selectedClassForStudent) {
+      showToast("Pilih santri dan kelas terlebih dahulu.", true);
+      return;
+    }
+
+    const student = santriUsers.find(
+      user => user.id === Number(selectedStudentForClass)
+    );
+
+    const classRoom = classes.find(
+      item => item.id === Number(selectedClassForStudent)
+    );
+
+    if (!student || !classRoom) {
+      showToast("Data santri atau kelas tidak ditemukan.", true);
+      return;
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .update({
+        class_id: classRoom.id,
+        class_name: classRoom.name,
+        kelas: classRoom.name
+      })
+      .eq("id", student.id)
+      .eq("role", "santri");
+
+    if (error) {
+      showToast("Gagal mengatur kelas santri: " + error.message, true);
+      return;
+    }
+
+    showToast(`Kelas ${student.username} berhasil diatur ke ${classRoom.name}.`);
+    showStudentClassModal = false;
+    await loadUsers();
+  }
+
+  /* =========================
      LOAD USERS
   ========================= */
 
@@ -303,7 +486,7 @@
     } = await supabase
       .from("users")
       .select(
-        "id, username, role"
+        "id, username, full_name, role, kelas, class_name, class_id"
       )
       .order(
         "username",
@@ -325,6 +508,219 @@
 
     users =
       (data || []) as User[];
+  }
+
+  /* =========================
+     REKAP NILAI
+  ========================= */
+
+  async function loadClasses() {
+    const { data, error } = await supabase
+      .from("classes")
+      .select("id, name")
+      .order("name", { ascending: true });
+
+    if (error) {
+      showToast("Gagal memuat kelas: " + error.message, true);
+      return;
+    }
+
+    classes = (data || []) as ClassRoom[];
+  }
+
+  async function loadGrades() {
+    gradesLoading = true;
+    gradeLoadError = "";
+
+    try {
+      let query = supabase
+        .from("student_grades")
+        .select("*")
+        .order("academic_year", { ascending: false })
+        .order("semester", { ascending: false })
+        .order("id", { ascending: false });
+
+      // Santri hanya mengambil nilai miliknya sendiri.
+      if (currentUser?.role === "santri") {
+        query = query.eq("user_id", currentUser.id);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        gradeLoadError = error.message;
+        showToast("Gagal memuat rekap nilai: " + error.message, true);
+        grades = [];
+        return;
+      }
+
+      grades = (data || []) as StudentGrade[];
+    } finally {
+      gradesLoading = false;
+    }
+  }
+
+  async function refreshGradeData() {
+    await Promise.all([loadUsers(), loadClasses(), loadGrades()]);
+  }
+
+  function resetGradeForm() {
+    editingGradeId = null;
+    gradeClassId = "";
+    gradeStudentId = "";
+    gradeSubject = "";
+    gradeAcademicYear = gradeFilterAcademicYear;
+    gradeSemester = gradeFilterSemester;
+    gradeTask = "";
+    gradeDailyTest = "";
+    gradePTS = "";
+    gradePAS = "";
+    gradeCharacter = "";
+    gradeSchoolExam = "";
+  }
+
+  function openAddGrade() {
+    if (currentUser?.role !== "admin" && currentUser?.role !== "ustad") {
+      showToast("Anda tidak memiliki akses untuk menginput nilai.", true);
+      return;
+    }
+
+    resetGradeForm();
+    showGradeModal = true;
+  }
+
+  function openEditGrade(grade: StudentGrade) {
+    if (currentUser?.role !== "admin" && currentUser?.role !== "ustad") return;
+
+    editingGradeId = grade.id || null;
+    gradeClassId = String(grade.class_id);
+    gradeStudentId = String(grade.user_id);
+    gradeSubject = grade.subject;
+    gradeAcademicYear = grade.academic_year;
+    gradeSemester = String(grade.semester);
+    gradeTask = grade.nilai_tugas ?? "";
+    gradeDailyTest = grade.nilai_ulangan_harian ?? "";
+    gradePTS = grade.nilai_pts ?? "";
+    gradePAS = grade.nilai_pas ?? "";
+    gradeCharacter = grade.nilai_sikap_karakter ?? "";
+    gradeSchoolExam = grade.nilai_ujian_sekolah ?? "";
+    showGradeModal = true;
+  }
+
+  function normalizeGrade(value: number | string) {
+    if (value === "" || value === null || value === undefined) return null;
+    const numberValue = Number(value);
+    if (!Number.isFinite(numberValue) || numberValue < 0 || numberValue > 100) return undefined;
+    return numberValue;
+  }
+
+  async function saveGrade() {
+    if (currentUser?.role !== "admin" && currentUser?.role !== "ustad") {
+      showToast("Anda tidak memiliki akses untuk menyimpan nilai.", true);
+      return;
+    }
+
+    if (!gradeClassId || !gradeStudentId || !gradeSubject || !gradeAcademicYear.trim()) {
+      showToast("Kelas, santri, mata pelajaran, tahun ajaran, dan semester wajib diisi.", true);
+      return;
+    }
+
+    if (!["1", "2"].includes(gradeSemester)) {
+      showToast("Semester harus 1 atau 2.", true);
+      return;
+    }
+
+    const values = [gradeTask, gradeDailyTest, gradePTS, gradePAS, gradeCharacter, gradeSchoolExam]
+      .map(normalizeGrade);
+
+    if (values.some(value => value === undefined)) {
+      showToast("Semua nilai harus berada di antara 0 sampai 100.", true);
+      return;
+    }
+
+    const payload = {
+      user_id: Number(gradeStudentId),
+      class_id: Number(gradeClassId),
+      subject: gradeSubject.trim(),
+      academic_year: gradeAcademicYear.trim(),
+      semester: Number(gradeSemester),
+      nilai_tugas: values[0],
+      nilai_ulangan_harian: values[1],
+      nilai_pts: values[2],
+      nilai_pas: values[3],
+      nilai_sikap_karakter: values[4],
+      nilai_ujian_sekolah: values[5]
+    };
+
+    const student = santriUsers.find(user => user.id === payload.user_id);
+        if (!student || Number(student.class_id) !== payload.class_id) {
+      showToast("Santri yang dipilih tidak sesuai dengan kelas.", true);
+      return;
+    }
+
+    let error;
+    if (editingGradeId) {
+      ({ error } = await supabase.from("student_grades").update(payload).eq("id", editingGradeId));
+    } else {
+      ({ error } = await supabase
+        .from("student_grades")
+        .upsert(payload, { onConflict: "user_id,subject,academic_year,semester" }));
+    }
+
+    if (error) {
+      showToast("Gagal menyimpan nilai: " + error.message, true);
+      return;
+    }
+
+    showToast("Nilai berhasil disimpan.");
+    showGradeModal = false;
+    await loadGrades();
+  }
+
+  async function deleteGrade(id: number) {
+    if (currentUser?.role !== "admin" && currentUser?.role !== "ustad") return;
+    if (!confirm("Hapus data nilai ini?")) return;
+
+    const { error } = await supabase
+      .from("student_grades")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      showToast("Gagal menghapus nilai: " + error.message, true);
+      return;
+    }
+
+    showToast("Data nilai berhasil dihapus.");
+    await loadGrades();
+  }
+
+  function getGradeStudentName(userId: number) {
+    const user = users.find(user => user.id === userId);
+    return user?.full_name || user?.username || "-";
+  }
+
+  function getGradeClassName(classId: number) {
+    return classes.find(item => item.id === classId)?.name || "-";
+  }
+
+
+  function getGradeAverage(grade: StudentGrade) {
+    if (grade.nilai_akhir !== null && grade.nilai_akhir !== undefined) {
+      return Number(grade.nilai_akhir).toFixed(2);
+    }
+
+    const values = [
+      grade.nilai_tugas,
+      grade.nilai_ulangan_harian,
+      grade.nilai_pts,
+      grade.nilai_pas,
+      grade.nilai_sikap_karakter,
+      grade.nilai_ujian_sekolah
+    ];
+
+    const total = values.reduce((sum, value) => sum + Number(value ?? 0), 0);
+    return (total / 6).toFixed(2);
   }
 
   /* =========================
@@ -1757,13 +2153,15 @@
      NAVIGATION
   ========================= */
 
-  function changeView(
+  async function changeView(
     view: ActiveView
   ) {
-
     activeView = view;
-
     sidebarOpen = false;
+
+    if (view === "grades") {
+      await refreshGradeData();
+    }
   }
 </script>
 
@@ -1840,6 +2238,15 @@
       >
         🗓️
         Jadwal
+      </button>
+
+      <button
+        class:active={activeView === "grades"}
+        class="nav-item"
+        on:click={() => changeView("grades")}
+      >
+        📊
+        Rekap Nilai
       </button>
 
 
@@ -2431,220 +2838,226 @@
 
       {:else if activeView === "schedule"}
 
-        <div
-          class="bca-card sub-view-container"
-        >
+        <div class="bca-card sub-view-container">
 
-          <div
-            class="sub-header-row"
-          >
-
+          <div class="sub-header-row">
             <div>
-
-              <h3>
-                🗓️ Jadwal & Pengajar
-              </h3>
-
-              <p
-                class="sub-description"
-              >
-                Lihat jadwal dan siapa
-                yang mengajar.
+              <h3>🗓️ Jadwal & Pengajar</h3>
+              <p class="sub-description">
+                Jadwal ditampilkan dan dikelompokkan berdasarkan hari.
               </p>
-
             </div>
 
-
-            <div
-              class="action-group-top"
-            >
-
+            <div class="action-group-top">
               {#if isAdmin}
-
-                <button
-                  class="btn-primary"
-                  on:click={
-                    openAddSchedule
-                  }
-                >
+                <button class="btn-primary" on:click={openAddSchedule}>
                   ➕ Tambah Jadwal
                 </button>
-
               {/if}
 
-
-              <button
-                class="btn-back"
-                on:click={() =>
-                  changeView("home")}
-              >
+              <button class="btn-back" on:click={() => changeView("home")}>
                 ← Kembali
               </button>
-
             </div>
-
           </div>
 
+          {#if schedules.length === 0}
+            <div class="empty-schedule">
+              📭 Belum ada jadwal.
+            </div>
+          {:else}
+            <div class="schedule-day-list">
 
-          <div
-            class="table-responsive"
-          >
+              {#each schedulesByDay as group}
+                {#if group.schedules.length > 0}
 
-            <table
-              class="data-table"
-            >
+                  <section class="schedule-day-group">
+                    <div class="schedule-day-header">
+                      <h4>📅 {group.day}</h4>
+                      <span>{group.schedules.length} Jadwal</span>
+                    </div>
 
-              <thead>
+                    <div class="schedule-card-list">
+                      {#each group.schedules as schedule}
 
-                <tr>
-
-                  <th>
-                    Hari
-                  </th>
-
-                  <th>
-                    Mata Pelajaran
-                  </th>
-
-                  <th>
-                    Pengajar
-                  </th>
-
-                  <th>
-                    Jam
-                  </th>
-
-                  {#if isAdmin}
-
-                    <th>
-                      Aksi
-                    </th>
-
-                  {/if}
-
-                </tr>
-
-              </thead>
-
-
-              <tbody>
-
-                {#if schedules.length === 0}
-
-                  <tr>
-
-                    <td
-                      colspan={
-                        isAdmin
-                          ? 5
-                          : 4
-                      }
-                      class="empty-cell"
-                    >
-
-                      Belum ada jadwal.
-
-                    </td>
-
-                  </tr>
-
-                {:else}
-
-                  {#each schedules as schedule}
-
-                    <tr>
-
-                      <td>
-                        {schedule.day}
-                      </td>
-
-
-                      <td>
-
-                        <strong>
-                          {schedule.subject}
-                        </strong>
-
-                      </td>
-
-
-                      <td>
-
-                        <div
-                          class="teacher-cell"
-                        >
-
-                          👨‍🏫
-
-                          {
-                            getTeacherName(
-                              schedule.teacher_id
-                            )
-                          }
-
-                        </div>
-
-                      </td>
-
-
-                      <td>
-                        {schedule.time}
-                      </td>
-
-
-                      {#if isAdmin}
-
-                        <td>
-
-                          <div
-                            class="action-buttons"
-                          >
-
-                            <button
-                              class="btn-icon"
-                              on:click={() =>
-                                openEditSchedule(
-                                  schedule
-                                )}
-                            >
-                              ✏️
-                            </button>
-
-
-                            {#if schedule.id}
-
-                              <button
-                                class="btn-icon danger"
-                                on:click={() =>
-                                  deleteSchedule(
-                                    schedule.id
-                                  )}
-                              >
-                                🗑️
-                              </button>
-
-                            {/if}
-
+                        <article class="schedule-item-card">
+                          <div class="schedule-time">
+                            🕒
+                            <strong>{schedule.time}</strong>
                           </div>
 
-                        </td>
+                          <div class="schedule-main-info">
+                            <strong class="schedule-subject">
+                              {schedule.subject}
+                            </strong>
 
-                      {/if}
+                            <span class="schedule-teacher">
+                              👨‍🏫 {getTeacherName(schedule.teacher_id)}
+                            </span>
+                          </div>
 
-                    </tr>
+                          {#if isAdmin}
+                            <div class="schedule-actions">
+                              <button
+                                class="btn-icon"
+                                title="Edit jadwal"
+                                on:click={() => openEditSchedule(schedule)}
+                              >
+                                ✏️
+                              </button>
 
-                  {/each}
+                              {#if schedule.id}
+                                <button
+                                  class="btn-icon danger"
+                                  title="Hapus jadwal"
+                                  on:click={() => deleteSchedule(schedule.id)}
+                                >
+                                  🗑️
+                                </button>
+                              {/if}
+                            </div>
+                          {/if}
+                        </article>
+
+                      {/each}
+                    </div>
+                  </section>
 
                 {/if}
+              {/each}
 
-              </tbody>
-
-            </table>
-
-          </div>
+            </div>
+          {/if}
 
         </div>
 
+
+      <!-- =========================
+           REKAP NILAI
+      ========================= -->
+
+      {:else if activeView === "grades"}
+
+        <div class="bca-card sub-view-container">
+          <div class="sub-header-row">
+            <div>
+              <h3>📊 Rekap Nilai Santri</h3>
+              <p class="sub-description">
+                {#if currentUser?.role === "santri"}
+                  Berikut rekap nilai Anda.
+                {:else}
+                  Kelola nilai santri berdasarkan kelas, mata pelajaran, dan semester.
+                {/if}
+              </p>
+            </div>
+
+            <div class="action-group-top">
+              {#if currentUser?.role === "admin" || currentUser?.role === "ustad"}
+                <button class="btn-secondary" on:click={openStudentClassModal}>👨‍🎓 Atur Kelas Santri</button>
+                <button class="btn-primary" on:click={openAddGrade}>➕ Input Nilai</button>
+              {/if}
+              <button class="btn-secondary" on:click={refreshGradeData} disabled={gradesLoading}>🔄 Muat Ulang</button>
+              <button class="btn-back" on:click={() => changeView("home")}>← Kembali</button>
+            </div>
+          </div>
+
+          {#if currentUser?.role !== "santri"}
+            <div class="grade-filter">
+              <div class="form-group-modal">
+                <label>Kelas</label>
+                <select bind:value={gradeFilterClass} on:change={() => gradeFilterStudent = ""}>
+                  <option value="">Semua Kelas</option>
+                  {#each classes as classRoom}
+                    <option value={classRoom.id}>{classRoom.name}</option>
+                  {/each}
+                </select>
+              </div>
+
+              <div class="form-group-modal">
+                <label>Santri</label>
+                <select bind:value={gradeFilterStudent}>
+                  <option value="">Semua Santri</option>
+                  {#each filteredGradeStudents as student}
+                    <option value={student.id}>{student.username}</option>
+                  {/each}
+                </select>
+              </div>
+
+              <div class="form-group-modal">
+                <label>Tahun Ajaran</label>
+                <input type="text" bind:value={gradeFilterAcademicYear} placeholder="2026/2027" />
+              </div>
+
+              <div class="form-group-modal">
+                <label>Semester</label>
+                <select bind:value={gradeFilterSemester}>
+                  <option value="1">Semester 1</option>
+                  <option value="2">Semester 2</option>
+                </select>
+              </div>
+            </div>
+          {/if}
+
+          {#if gradeLoadError}
+            <div class="error-message">⚠️ Gagal terhubung ke data nilai: {gradeLoadError}</div>
+          {/if}
+
+          <div class="table-responsive">
+            <table class="data-table grade-table">
+              <thead>
+                <tr>
+                  {#if currentUser?.role !== "santri"}<th>Santri</th>{/if}
+                  <th>Kelas</th>
+                  <th>Mata Pelajaran</th>
+                  <th>Tugas</th>
+                  <th>UH</th>
+                  <th>PTS</th>
+                  <th>PAS</th>
+                  <th>Sikap</th>
+                  <th>Ujian Sekolah</th>
+                  <th>Nilai Akhir</th>
+                  {#if currentUser?.role === "admin" || currentUser?.role === "ustad"}<th>Aksi</th>{/if}
+                </tr>
+              </thead>
+              <tbody>
+                {#if gradesLoading}
+                  <tr>
+                    <td colspan={currentUser?.role === "santri" ? 9 : 11} class="empty-cell">⏳ Memuat data nilai...</td>
+                  </tr>
+                {:else if filteredGrades.length === 0}
+                  <tr>
+                    <td colspan={currentUser?.role === "santri" ? 9 : 11} class="empty-cell">📭 Belum ada data nilai.</td>
+                  </tr>
+                {:else}
+                  {#each filteredGrades as grade}
+                    <tr>
+                      {#if currentUser?.role !== "santri"}<td>{getGradeStudentName(grade.user_id)}</td>{/if}
+                      <td>{getGradeClassName(grade.class_id)}</td>
+                      <td>{grade.subject || "-"}</td>
+                      <td>{grade.nilai_tugas ?? "-"}</td>
+                      <td>{grade.nilai_ulangan_harian ?? "-"}</td>
+                      <td>{grade.nilai_pts ?? "-"}</td>
+                      <td>{grade.nilai_pas ?? "-"}</td>
+                      <td>{grade.nilai_sikap_karakter ?? "-"}</td>
+                      <td>{grade.nilai_ujian_sekolah ?? "-"}</td>
+                      <td><strong>{getGradeAverage(grade)}</strong></td>
+                      {#if currentUser?.role === "admin" || currentUser?.role === "ustad"}
+                        <td>
+                          <div class="action-buttons">
+                            <button class="btn-icon" on:click={() => openEditGrade(grade)} title="Edit nilai">✏️</button>
+                            {#if grade.id}
+                              <button class="btn-icon danger" on:click={() => deleteGrade(grade.id!)} title="Hapus nilai">🗑️</button>
+                            {/if}
+                          </div>
+                        </td>
+                      {/if}
+                    </tr>
+                  {/each}
+                {/if}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
       <!-- =========================
            ANNOUNCEMENT
@@ -3416,6 +3829,127 @@
 
   </div>
 
+{/if}
+
+
+<!-- =========================
+     ASSIGN STUDENT CLASS MODAL
+========================= -->
+
+{#if showStudentClassModal}
+  <div class="modal-backdrop" on:click={() => showStudentClassModal = false}>
+    <div class="modal-card small-modal-card" on:click|stopPropagation>
+      <div class="modal-header">
+        <div>
+          <h3>👨‍🎓 Atur Kelas Santri</h3>
+          <p class="modal-subtitle">Pilih santri lalu tentukan kelasnya.</p>
+        </div>
+        <button class="btn-close-modal" on:click={() => showStudentClassModal = false}>✕</button>
+      </div>
+
+      <div class="form-group-modal">
+        <label>Santri</label>
+        <select bind:value={selectedStudentForClass}>
+          <option value="">-- Pilih Santri --</option>
+          {#each santriUsers as santri}
+            <option value={santri.id}>
+              {santri.full_name || santri.username} — {santri.class_id ? (santri.class_name || getGradeClassName(Number(santri.class_id))) : "Belum memiliki kelas"}
+            </option>
+          {/each}
+        </select>
+        {#if unassignedSantri.length > 0}
+          <small class="form-help">{unassignedSantri.length} santri belum memiliki kelas.</small>
+        {/if}
+      </div>
+
+      <div class="form-group-modal">
+        <label>Kelas</label>
+        <select bind:value={selectedClassForStudent}>
+          <option value="">-- Pilih Kelas --</option>
+          {#each classes as classRoom}
+            <option value={classRoom.id}>{classRoom.name}</option>
+          {/each}
+        </select>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" on:click={() => showStudentClassModal = false}>Batal</button>
+        <button class="btn-primary" on:click={saveStudentClass}>💾 Simpan Kelas</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- =========================
+     GRADE MODAL
+========================= -->
+
+{#if showGradeModal}
+  <div class="modal-backdrop" on:click={() => showGradeModal = false}>
+    <div class="modal-card grade-modal-card" on:click|stopPropagation>
+      <div class="modal-header">
+        <h3>{editingGradeId ? "Edit Nilai Santri" : "Input Nilai Santri"}</h3>
+        <button class="btn-close-modal" on:click={() => showGradeModal = false}>✕</button>
+      </div>
+
+      <div class="grade-form-grid">
+        <div class="form-group-modal">
+          <label>Kelas</label>
+          <select bind:value={gradeClassId} on:change={() => { gradeStudentId = ""; gradeSubject = ""; }}>
+            <option value="">-- Pilih Kelas --</option>
+            {#each classes as classRoom}
+              <option value={classRoom.id}>{classRoom.name}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="form-group-modal">
+          <label>Santri</label>
+          <select bind:value={gradeStudentId}>
+            <option value="">-- Pilih Santri --</option>
+            {#each gradeStudents as student}
+              <option value={student.id}>{student.username}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="form-group-modal">
+          <label>Mata Pelajaran</label>
+          <select bind:value={gradeSubject}>
+            <option value="">-- Pilih Mata Pelajaran --</option>
+            {#each subjectOptions as subject}
+              <option value={subject}>{subject}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="form-group-modal">
+          <label>Tahun Ajaran</label>
+          <input type="text" bind:value={gradeAcademicYear} placeholder="2026/2027" />
+        </div>
+
+        <div class="form-group-modal">
+          <label>Semester</label>
+          <select bind:value={gradeSemester}>
+            <option value="1">Semester 1</option>
+            <option value="2">Semester 2</option>
+          </select>
+        </div>
+
+        <div class="form-group-modal"><label>Nilai Tugas</label><input type="number" min="0" max="100" bind:value={gradeTask} /></div>
+        <div class="form-group-modal"><label>Nilai Ulangan Harian</label><input type="number" min="0" max="100" bind:value={gradeDailyTest} /></div>
+        <div class="form-group-modal"><label>Penilaian Tengah Semester</label><input type="number" min="0" max="100" bind:value={gradePTS} /></div>
+        <div class="form-group-modal"><label>Penilaian Akhir Semester</label><input type="number" min="0" max="100" bind:value={gradePAS} /></div>
+        <div class="form-group-modal"><label>Nilai Sikap / Karakter</label><input type="number" min="0" max="100" bind:value={gradeCharacter} /></div>
+        <div class="form-group-modal"><label>Nilai Ujian Sekolah</label><input type="number" min="0" max="100" bind:value={gradeSchoolExam} /></div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" on:click={() => showGradeModal = false}>Batal</button>
+        <button class="btn-primary" on:click={saveGrade}>💾 Simpan Nilai</button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 
@@ -6581,4 +7115,175 @@
     }
   }
 
+
+  /* =========================
+     SCHEDULE BY DAY
+  ========================= */
+  .schedule-day-list {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .schedule-day-group {
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #ffffff;
+  }
+
+  .schedule-day-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px;
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .schedule-day-header h4 {
+    margin: 0;
+    font-size: 18px;
+    color: #0f172a;
+  }
+
+  .schedule-day-header span {
+    font-size: 12px;
+    font-weight: 700;
+    color: #475569;
+    background: #e2e8f0;
+    padding: 5px 10px;
+    border-radius: 999px;
+  }
+
+  .schedule-card-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .schedule-item-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 18px;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  .schedule-item-card:last-child {
+    border-bottom: none;
+  }
+
+  .schedule-time {
+    min-width: 100px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: #334155;
+  }
+
+  .schedule-main-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .schedule-subject {
+    font-size: 16px;
+    color: #0f172a;
+  }
+
+  .schedule-teacher {
+    font-size: 13px;
+    color: #64748b;
+  }
+
+  .schedule-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .empty-schedule {
+    padding: 35px 20px;
+    text-align: center;
+    color: #64748b;
+  }
+
+  @media (max-width: 640px) {
+    .schedule-item-card {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .schedule-time {
+      min-width: auto;
+      width: 100%;
+    }
+
+    .schedule-actions {
+      width: 100%;
+      justify-content: flex-end;
+    }
+  }
+
+  /* =========================
+     REKAP NILAI
+  ========================= */
+
+  .grade-filter {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    padding: 16px;
+    margin-bottom: 20px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #f8fafc;
+  }
+
+  .grade-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    padding: 4px 0 18px;
+  }
+
+  .grade-modal-card {
+    width: min(920px, 96vw);
+    max-height: 92vh;
+    overflow-y: auto;
+  }
+
+  .grade-table th,
+  .grade-table td {
+    white-space: nowrap;
+  }
+
+  @media (max-width: 768px) {
+    .grade-filter,
+    .grade-form-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+
+  .small-modal-card {
+    max-width: 560px;
+  }
+
+  .modal-subtitle {
+    margin: 4px 0 0;
+    font-size: 0.9rem;
+    color: #64748b;
+  }
+
+  .form-help {
+    display: block;
+    margin-top: 6px;
+    color: #64748b;
+    font-size: 0.82rem;
+  }
 </style>
+
