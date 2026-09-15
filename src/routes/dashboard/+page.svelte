@@ -1,7 +1,7 @@
 
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { goto } from "$app/navigation";
 
   /* =========================
@@ -15,6 +15,7 @@
     email: string;
     password_hash?: string;
     role: "admin" | "santri" | "ustad";
+    class_name: string | null;
   }
 
   interface Entry {
@@ -57,6 +58,7 @@
     day: string;
     class_name: string;
     subject: string;
+    subject2?: string | null;
     teacher_id: number | null;
     time: string;
   }
@@ -64,6 +66,7 @@
   interface ScheduleFormItem {
     class_name: string;
     subject: string;
+    subject2: string;
     teacher_id: string;
     time: string;
   }
@@ -199,6 +202,7 @@
   let formEmail = "";
   let formPassword = "";
   let formConfirmPassword = "";
+  let formClassName = "";
 
   let formRole:
     | "admin"
@@ -234,12 +238,24 @@
       .split("T")[0];
 
   let selectedAttendanceUser = "";
+  let attendanceClassFilter = "";
+  let attendanceSearch = "";
 
   let attendanceStatus:
     | "hadir"
     | "izin"
     | "sakit"
     | "alpha" = "hadir";
+
+  /* =========================
+     QR SCANNER
+  ========================= */
+
+  let showQrScanner = false;
+  let qrScannerError = "";
+  let qrScannerStream: MediaStream | null = null;
+  let qrScannerTimer: ReturnType<typeof setInterval> | null = null;
+  let qrVideoElement: HTMLVideoElement;
 
   /* =========================
      SCHEDULE
@@ -251,7 +267,7 @@
   let scheduleDay = "";
 
   let scheduleItems: ScheduleFormItem[] = [
-    { class_name: "", subject: "None", teacher_id: "", time: "" }
+    { class_name: "", subject: "None", subject2: "None", teacher_id: "", time: "" }
   ];
 
   /* =========================
@@ -324,6 +340,43 @@
         user.role === "santri"
     );
 
+  function getSchoolLevel(className: string | null | undefined) {
+    if (!className) return "";
+
+    const value = className.trim().toLowerCase();
+
+    if ([
+      "kelas 1", "kelas 2", "kelas 3",
+      "kelas 4", "kelas 5", "kelas 6", "sd"
+    ].includes(value)) return "SD";
+
+    if ([
+      "kelas 7", "kelas 8", "kelas 9", "smp"
+    ].includes(value)) return "SMP";
+
+    if ([
+      "kelas 10", "kelas 11", "kelas 12", "sma"
+    ].includes(value)) return "SMA";
+
+    return className;
+  }
+
+  $: filteredAttendanceSantri =
+    santriUsers.filter(user => {
+      const levelMatch =
+        !attendanceClassFilter ||
+        getSchoolLevel(user.class_name) === attendanceClassFilter;
+
+      const keyword = attendanceSearch.trim().toLowerCase();
+      const searchMatch =
+        !keyword ||
+        user.full_name.toLowerCase().includes(keyword) ||
+        user.username.toLowerCase().includes(keyword) ||
+        (user.class_name || "").toLowerCase().includes(keyword);
+
+      return levelMatch && searchMatch;
+    });
+
   $: ustadUsers =
     users.filter(
       user =>
@@ -383,7 +436,7 @@
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, full_name, username, email, role")
+      .select("id, full_name, username, email, role, class_name")
       .order("username", { ascending: true });
 
     if (error) {
@@ -781,6 +834,7 @@
     formEmail = "";
     formPassword = "";
     formConfirmPassword = "";
+    formClassName = "";
     formRole = "santri";
   }
 
@@ -807,6 +861,7 @@
     formPassword = "";
     formConfirmPassword = "";
     formRole = user.role;
+    formClassName = user.class_name || "";
     showUserModal = true;
   }
 
@@ -823,9 +878,15 @@
     const email = formEmail.trim().toLowerCase();
     const password = formPassword;
     const confirmPassword = formConfirmPassword;
+    const class_name = formRole === "santri" ? formClassName.trim() : null;
 
     if (!full_name || !username || !email) {
       showToast("❌ Nama lengkap, username, dan email wajib diisi.", true);
+      return;
+    }
+
+    if (formRole === "santri" && !class_name) {
+      showToast("❌ Kelas wajib dipilih untuk santri.", true);
       return;
     }
 
@@ -891,11 +952,12 @@
       }
 
       if (editingUserId !== null) {
-        const payload: Record<string, string> = {
+        const payload: Record<string, any> = {
           full_name,
           username,
           email,
-          role: formRole
+          role: formRole,
+          class_name
         };
 
         if (password) {
@@ -919,7 +981,8 @@
             username,
             email,
             password_hash,
-            role: formRole
+            role: formRole,
+            class_name
           }]);
 
         if (error) throw error;
@@ -1244,7 +1307,7 @@ async function deleteUser(
   ========================= */
 
   function createEmptyScheduleItem(): ScheduleFormItem {
-    return { class_name: "", subject: "None", teacher_id: "", time: "" };
+    return { class_name: "", subject: "None", subject2: "None", teacher_id: "", time: "" };
   }
 
   function addScheduleItem() {
@@ -1277,6 +1340,7 @@ async function deleteUser(
     scheduleItems = [{
       class_name: schedule.class_name || "",
       subject: schedule.subject || "None",
+      subject2: schedule.subject2 || "None",
       teacher_id: schedule.teacher_id ? String(schedule.teacher_id) : "",
       time: schedule.time || ""
     }];
@@ -1306,6 +1370,9 @@ async function deleteUser(
       day: scheduleDay,
       class_name: item.class_name,
       subject: item.subject || "None",
+      subject2: item.subject2 && item.subject2 !== "None" && item.subject2 !== item.subject
+        ? item.subject2
+        : null,
       teacher_id: Number(item.teacher_id),
       time: item.time
     }));
@@ -1658,6 +1725,134 @@ async function deleteUser(
   /* =========================
      BARCODE
   ========================= */
+
+  function getQrValue(santriId: number) {
+    return `santri:${santriId}`;
+  }
+
+  function getQrImageUrl(santriId: number) {
+    const data = encodeURIComponent(getQrValue(santriId));
+    return `https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=10&data=${data}`;
+  }
+
+  function parseQrValue(value: string) {
+    const text = value.trim();
+
+    const direct = text.match(/^santri:(\d+)$/i);
+    if (direct) return Number(direct[1]);
+
+    try {
+      const url = new URL(text);
+      const id = url.searchParams.get("santri");
+      if (id && /^\d+$/.test(id)) return Number(id);
+    } catch {
+      // Bukan URL, lanjutkan sebagai teks biasa.
+    }
+
+    const idMatch = text.match(/(?:ID[-:]?)(\d+)/i);
+    return idMatch ? Number(idMatch[1]) : null;
+  }
+
+  async function handleQrScan(value: string) {
+    const userId = parseQrValue(value);
+
+    if (!userId) {
+      qrScannerError = "QR tidak dikenali. Gunakan QR santri dari menu Barcode.";
+      return;
+    }
+
+    const santri = santriUsers.find(user => user.id === userId);
+
+    if (!santri) {
+      qrScannerError = "Data santri dari QR tidak ditemukan.";
+      return;
+    }
+
+    selectedAttendanceUser = String(santri.id);
+    attendanceSearch = santri.full_name || santri.username;
+    attendanceClassFilter = getSchoolLevel(santri.class_name);
+    activeView = "attendance";
+
+    await stopQrScanner();
+    showQrScanner = false;
+    qrScannerError = "";
+    showToast(`✓ ${santri.full_name || santri.username} dipilih untuk absensi.`);
+  }
+
+  async function startQrScanner() {
+    if (!isAdmin) {
+      showToast("Hanya admin yang dapat melakukan absensi.", true);
+      return;
+    }
+
+    showQrScanner = true;
+    qrScannerError = "";
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      qrScannerError = "Kamera Chrome tidak tersedia. Pastikan situs dibuka melalui HTTPS atau localhost.";
+      return;
+    }
+
+    try {
+      qrScannerStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      });
+
+      await tick();
+      if (!qrVideoElement) throw new Error("Video kamera belum siap.");
+
+      qrVideoElement.srcObject = qrScannerStream;
+      await qrVideoElement.play();
+
+      const BarcodeDetectorClass = (window as any).BarcodeDetector;
+      if (!BarcodeDetectorClass) {
+        qrScannerError = "Chrome belum mendukung pembaca QR bawaan. Gunakan Chrome versi terbaru atau pilih santri secara manual.";
+        return;
+      }
+
+      const detector = new BarcodeDetectorClass({ formats: ["qr_code"] });
+      qrScannerTimer = setInterval(async () => {
+        if (!qrVideoElement || qrVideoElement.readyState < 2) return;
+        try {
+          const codes = await detector.detect(qrVideoElement);
+          if (codes?.length && codes[0]?.rawValue) {
+            await handleQrScan(codes[0].rawValue);
+          }
+        } catch {
+          // Abaikan frame kamera yang gagal dibaca.
+        }
+      }, 300);
+    } catch (error) {
+      await stopQrScanner();
+      qrScannerError = error instanceof DOMException && error.name === "NotAllowedError"
+        ? "Izin kamera Chrome ditolak. Izinkan Camera untuk situs ini."
+        : "Kamera Chrome tidak dapat dibuka. Pastikan kamera tersedia dan situs menggunakan HTTPS atau localhost.";
+    }
+  }
+
+  async function stopQrScanner() {
+    if (qrScannerTimer) {
+      clearInterval(qrScannerTimer);
+      qrScannerTimer = null;
+    }
+
+    if (qrScannerStream) {
+      qrScannerStream.getTracks().forEach(track => track.stop());
+      qrScannerStream = null;
+    }
+
+    if (qrVideoElement) {
+      qrVideoElement.pause();
+      qrVideoElement.srcObject = null;
+    }
+  }
+
+  async function closeQrScanner() {
+    await stopQrScanner();
+    showQrScanner = false;
+    qrScannerError = "";
+  }
 
   function getBarcodeBars(
     id: number
@@ -2596,6 +2791,10 @@ async function deleteUser(
                   </th>
 
                   <th>
+                    Kelas
+                  </th>
+
+                  <th>
                     Aksi
                   </th>
 
@@ -2653,6 +2852,13 @@ async function deleteUser(
 
                     </td>
 
+                    <td>
+                      {#if user.class_name}
+                        <span class="class-badge">🏫 {user.class_name}</span>
+                      {:else}
+                        <span class="text-muted">—</span>
+                      {/if}
+                    </td>
 
                     <td>
 
@@ -2766,24 +2972,41 @@ async function deleteUser(
             >
 
               <select
-                bind:value={
-                  selectedAttendanceUser
-                }
+                bind:value={attendanceClassFilter}
+                on:change={() => {
+                  selectedAttendanceUser = "";
+                }}
+              >
+                <option value="">-- Semua Jenjang --</option>
+                <option value="SD">SD (Kelas 1–6)</option>
+                <option value="SMP">SMP (Kelas 7–9)</option>
+                <option value="SMA">SMA (Kelas 10–12)</option>
+              </select>
+
+              <input
+                class="attendance-search"
+                type="search"
+                placeholder="🔎 Cari nama/username santri..."
+                bind:value={attendanceSearch}
+                on:input={() => {
+                  selectedAttendanceUser = "";
+                }}
+              />
+
+              <select
+                bind:value={selectedAttendanceUser}
               >
 
                 <option value="">
-                  -- Pilih Santri --
+                  -- Pilih Santri ({filteredAttendanceSantri.length}) --
                 </option>
 
-
-                {#each santriUsers as santri}
-
-                  <option
-                    value={santri.id}
-                  >
-                    {santri.username}
+                {#each filteredAttendanceSantri as santri}
+                  <option value={santri.id}>
+                    {santri.full_name || santri.username}
+                    {santri.full_name && santri.username !== santri.full_name ? ` (@${santri.username})` : ""}
+                    {santri.class_name ? ` — ${santri.class_name}` : ""}
                   </option>
-
                 {/each}
 
               </select>
@@ -3065,7 +3288,19 @@ async function deleteUser(
                           {#each dayGroup.items as schedule}
                             <tr>
                               <td><span class="class-badge">🏫 {schedule.class_name || "Belum ditentukan"}</span></td>
-                              <td>{#if schedule.subject === "None"}<span class="subject-none">Tidak ada</span>{:else}<strong>{schedule.subject}</strong>{/if}</td>
+                              <td>
+                                <div class="schedule-subjects">
+                                  {#if schedule.subject && schedule.subject !== "None"}
+                                    <span class="subject-badge">{schedule.subject}</span>
+                                  {/if}
+                                  {#if schedule.subject2 && schedule.subject2 !== "None"}
+                                    <span class="subject-badge subject-badge-secondary">{schedule.subject2}</span>
+                                  {/if}
+                                  {#if (!schedule.subject || schedule.subject === "None") && (!schedule.subject2 || schedule.subject2 === "None")}
+                                    <span class="subject-none">Tidak ada</span>
+                                  {/if}
+                                </div>
+                              </td>
                               <td><div class="teacher-cell">👨‍🏫 {getTeacherName(schedule.teacher_id)}</div></td>
                               <td>🕒 {schedule.time}</td>
                               {#if isAdmin}
@@ -3288,13 +3523,22 @@ async function deleteUser(
             </div>
 
 
-            <button
-              class="btn-back"
-              on:click={() =>
-                changeView("home")}
-            >
-              ← Kembali
-            </button>
+            <div class="barcode-header-actions">
+              <button
+                class="btn-primary"
+                on:click={startQrScanner}
+              >
+                📷 Scan QR Absen
+              </button>
+
+              <button
+                class="btn-back"
+                on:click={() =>
+                  changeView("home")}
+              >
+                ← Kembali
+              </button>
+            </div>
 
           </div>
 
@@ -3343,26 +3587,20 @@ async function deleteUser(
                   </div>
 
 
-                  <div
-                    class="barcode"
-                  >
-
-                    {#each getBarcodeBars(santri.id) as width}
-
-                      <span
-                        style="width: {width}px"
-                      ></span>
-
-                    {/each}
-
+                  <div class="qr-code-wrap">
+                    <img
+                      class="qr-code-image"
+                      src={getQrImageUrl(santri.id)}
+                      alt={`QR absensi ${santri.full_name || santri.username}`}
+                      loading="lazy"
+                    />
                   </div>
 
-
-                  <div
-                    class="barcode-number"
-                  >
-                    ID-{santri.id}
+                  <div class="barcode-number">
+                    QR-{santri.id}
                   </div>
+
+                  <small class="qr-hint">Scan QR ini untuk memilih santri di Absensi.</small>
 
                 </div>
 
@@ -3535,6 +3773,39 @@ async function deleteUser(
 
 
 <!-- =========================
+     QR SCANNER
+========================= -->
+
+{#if showQrScanner}
+  <div class="modal-backdrop qr-scanner-backdrop" role="presentation" on:click={(event) => { if (event.currentTarget === event.target) closeQrScanner(); }}>
+    <div class="modal-content qr-scanner-modal" role="dialog" aria-modal="true" aria-label="Scan QR Absensi">
+      <div class="modal-header">
+        <div>
+          <h3>📷 Scan QR Absensi</h3>
+          <p class="sub-description">Kamera terhubung langsung ke Chrome. Arahkan kamera belakang ke QR santri.</p>
+        </div>
+        <button class="btn-close-modal" aria-label="Tutup scanner" on:click={closeQrScanner}>✕</button>
+      </div>
+
+      <div class="qr-camera-box">
+        <video bind:this={qrVideoElement} class="qr-camera-video" playsinline muted></video>
+        <div class="qr-scan-frame" aria-hidden="true"></div>
+      </div>
+
+      {#if qrScannerError}
+        <div class="qr-scanner-error">{qrScannerError}</div>
+      {:else}
+        <p class="qr-scanner-status">Memindai QR secara otomatis…</p>
+      {/if}
+
+      <div class="modal-footer">
+        <button class="btn-secondary" on:click={closeQrScanner}>Tutup</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- =========================
      USER MODAL
 ========================= -->
 
@@ -3583,6 +3854,19 @@ async function deleteUser(
         </select>
       </div>
 
+      {#if formRole === "santri"}
+        <div class="form-group-modal">
+          <label for="user-class">Kelas <span class="required-mark">*</span></label>
+          <select id="user-class" bind:value={formClassName} disabled={isSavingUser}>
+            <option value="">-- Pilih Kelas --</option>
+            {#each classOptions as className}
+              <option value={className}>{className}</option>
+            {/each}
+          </select>
+          <small class="form-hint">Pilih kelas santri dari daftar yang tersedia.</small>
+        </div>
+      {/if}
+
       <div class="modal-footer">
         <button type="button" class="btn-secondary" disabled={isSavingUser} on:click={() => showUserModal = false}>Batal</button>
         <button type="button" class="btn-primary" disabled={isSavingUser} on:click={saveUser}>
@@ -3625,6 +3909,9 @@ async function deleteUser(
                 <strong>{user.full_name || user.username}</strong>
                 <span>@{user.username}</span>
                 <small>{user.email}</small>
+                {#if user.role === "santri" && user.class_name}
+                  <small>🏫 {user.class_name}</small>
+                {/if}
               </div>
               <span class={`role-badge ${user.role}`}>{user.role}</span>
             </div>
@@ -3663,7 +3950,8 @@ async function deleteUser(
             {#if editingScheduleId === null && scheduleItems.length > 1}<button type="button" class="btn-remove-schedule" on:click={() => removeScheduleItem(index)}>🗑️ Hapus</button>{/if}
           </div>
           <div class="form-group-modal"><label>🏫 Kelas</label><select bind:value={item.class_name}><option value="">Pilih Kelas</option>{#each classOptions as className}<option value={className}>{className}</option>{/each}</select></div>
-          <div class="form-group-modal"><label>📚 Mata Pelajaran</label><select bind:value={item.subject}>{#each subjectOptions as subject}<option value={subject}>{subject === "None" ? "None / Tidak Ada" : subject}</option>{/each}</select></div>
+          <div class="form-group-modal"><label>📚 Mata Pelajaran 1</label><select bind:value={item.subject}>{#each subjectOptions as subject}<option value={subject}>{subject === "None" ? "Tidak Ada" : subject}</option>{/each}</select></div>
+          <div class="form-group-modal"><label>📚 Mata Pelajaran 2 <span class="form-hint-inline">(opsional)</span></label><select bind:value={item.subject2}>{#each subjectOptions as subject}<option value={subject}>{subject === "None" ? "Tidak Ada / 1 Pelajaran Saja" : subject}</option>{/each}</select></div>
           <div class="form-group-modal">
             <label>👨‍🏫 Ustad Pengajar</label>
             <select bind:value={item.teacher_id}>
@@ -5294,6 +5582,15 @@ async function deleteUser(
      ROLE
   ========================= */
 
+  .required-mark {
+    color: #dc2626;
+    font-weight: 700;
+  }
+
+  .text-muted {
+    color: #94a3b8;
+  }
+
   .role-badge {
 
     display:
@@ -5505,7 +5802,8 @@ async function deleteUser(
   }
 
 
-  .attendance-form select {
+  .attendance-form select,
+  .attendance-form input {
 
     padding:
       10px;
@@ -5520,6 +5818,10 @@ async function deleteUser(
     min-width:
       180px;
 
+  }
+
+  .attendance-search {
+    min-width: 240px;
   }
 
 
@@ -6093,6 +6395,90 @@ async function deleteUser(
   }
 
 
+  .barcode-header-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .qr-code-wrap {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+  }
+
+  .qr-code-image {
+    width: 220px;
+    height: 220px;
+    display: block;
+    image-rendering: pixelated;
+  }
+
+  .qr-hint {
+    display: block;
+    text-align: center;
+    margin-top: 8px;
+    color: #64748b;
+    line-height: 1.5;
+  }
+
+  .qr-native-camera-input {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .qr-scanner-modal {
+    width: min(520px, calc(100vw - 30px));
+  }
+
+  .qr-camera-box {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    overflow: hidden;
+    border-radius: 18px;
+    background: #0f172a;
+  }
+
+  .qr-camera-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .qr-scan-frame {
+    position: absolute;
+    inset: 18%;
+    border: 3px solid #fff;
+    border-radius: 18px;
+    box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.25);
+    pointer-events: none;
+  }
+
+  .qr-scanner-status {
+    text-align: center;
+    color: #64748b;
+    margin: 12px 0 0;
+  }
+
+  .qr-scanner-error {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: #fef2f2;
+    color: #b91c1c;
+    line-height: 1.5;
+    font-size: 13px;
+  }
+
   /* =========================
      FORM
   ========================= */
@@ -6595,6 +6981,7 @@ async function deleteUser(
 
 
     .attendance-form select,
+    .attendance-form input,
     .attendance-form button {
 
       width:
@@ -6859,6 +7246,30 @@ async function deleteUser(
     color: #2457a5;
     font-size: 13px;
     font-weight: 600;
+  }
+
+  .schedule-subjects {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .subject-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 11px;
+    border-radius: 9px;
+    background: #eef4ff;
+    color: #2457a5;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .subject-badge-secondary {
+    background: #f3e8ff;
+    color: #7e22ce;
   }
 
   .subject-none {
