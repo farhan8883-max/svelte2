@@ -78,6 +78,7 @@
     id?: number;
     day: string;
     subject: string;
+    subject2?: string | null;
     teacher_id: number | null;
     time: string;
   }
@@ -266,6 +267,9 @@
     | "sakit"
     | "alpha" = "hadir";
 
+  // Kelompok pendidikan untuk halaman absensi
+  let selectedAttendanceGroup: "SD" | "SMP" | "SMA" = "SD";
+
   /* =========================
      SCHEDULE
   ========================= */
@@ -275,6 +279,7 @@
 
   let scheduleDay = "";
   let scheduleSubject = "";
+  let scheduleSubject2 = "";
   let scheduleTeacherId = "";
   let scheduleTime = "";
 
@@ -361,6 +366,47 @@
       user =>
         user.role === "santri"
     );
+
+  function getEducationGroup(user: User): "SD" | "SMP" | "SMA" | null {
+    const classText = `${user.class_name || ""} ${user.kelas || ""}`.toLowerCase();
+
+    // Jika nama kelas sudah menyebut jenjang, gunakan langsung.
+    if (classText.includes("sma") || classText.includes("smk")) return "SMA";
+    if (classText.includes("smp") || classText.includes("mts")) return "SMP";
+    if (classText.includes("sd") || classText.includes("mi")) return "SD";
+
+    // Jika hanya berupa nomor kelas: 1-6 = SD, 7-9 = SMP, 10-12 = SMA.
+    const match = classText.match(/\b(\d{1,2})\b/);
+    const gradeNumber = match ? Number(match[1]) : NaN;
+
+    if (gradeNumber >= 1 && gradeNumber <= 6) return "SD";
+    if (gradeNumber >= 7 && gradeNumber <= 9) return "SMP";
+    if (gradeNumber >= 10 && gradeNumber <= 12) return "SMA";
+
+    return null;
+  }
+
+  $: attendanceStudents = santriUsers.filter(
+    santri => getEducationGroup(santri) === selectedAttendanceGroup
+  );
+
+  $: attendanceGroupCounts = {
+    SD: santriUsers.filter(santri => getEducationGroup(santri) === "SD").length,
+    SMP: santriUsers.filter(santri => getEducationGroup(santri) === "SMP").length,
+    SMA: santriUsers.filter(santri => getEducationGroup(santri) === "SMA").length
+  };
+
+  $: attendanceGroupData = attendanceStudents.map(santri => ({
+    student: santri,
+    attendance: getAttendance(santri.id)
+  }));
+
+  $: attendanceGroupSummary = {
+    hadir: attendanceGroupData.filter(item => item.attendance?.status === "hadir").length,
+    izin: attendanceGroupData.filter(item => item.attendance?.status === "izin").length,
+    sakit: attendanceGroupData.filter(item => item.attendance?.status === "sakit").length,
+    alpha: attendanceGroupData.filter(item => item.attendance?.status === "alpha").length
+  };
 
   $: ustadUsers =
     users.filter(
@@ -1523,6 +1569,7 @@
 
     scheduleDay = "";
     scheduleSubject = "";
+    scheduleSubject2 = "";
     scheduleTeacherId = "";
     scheduleTime = "";
 
@@ -1548,7 +1595,10 @@
       schedule.day;
 
     scheduleSubject =
-      schedule.subject;
+      schedule.subject || "";
+
+    scheduleSubject2 =
+      schedule.subject2 || "";
 
     scheduleTeacherId =
       schedule.teacher_id
@@ -1594,7 +1644,10 @@
         scheduleDay,
 
       subject:
-        scheduleSubject,
+        scheduleSubject.trim(),
+
+      subject2:
+        scheduleSubject2.trim() || null,
 
       teacher_id:
         Number(
@@ -2558,6 +2611,45 @@
           </div>
 
 
+          <div class="attendance-group-tabs">
+            <button
+              class:active={selectedAttendanceGroup === "SD"}
+              class="attendance-group-tab"
+              on:click={() => { selectedAttendanceGroup = "SD"; selectedAttendanceUser = ""; }}
+            >
+              <span>SD</span>
+              <small>{attendanceGroupCounts.SD} santri</small>
+            </button>
+
+            <button
+              class:active={selectedAttendanceGroup === "SMP"}
+              class="attendance-group-tab"
+              on:click={() => { selectedAttendanceGroup = "SMP"; selectedAttendanceUser = ""; }}
+            >
+              <span>SMP</span>
+              <small>{attendanceGroupCounts.SMP} santri</small>
+            </button>
+
+            <button
+              class:active={selectedAttendanceGroup === "SMA"}
+              class="attendance-group-tab"
+              on:click={() => { selectedAttendanceGroup = "SMA"; selectedAttendanceUser = ""; }}
+            >
+              <span>SMA</span>
+              <small>{attendanceGroupCounts.SMA} santri</small>
+            </button>
+          </div>
+
+
+          <div class="attendance-group-title">
+            <div>
+              <strong>Kelompok {selectedAttendanceGroup}</strong>
+              <span>Absensi santri {selectedAttendanceGroup} pada {attendanceDate}</span>
+            </div>
+            <span class="attendance-student-count">{attendanceStudents.length} santri</span>
+          </div>
+
+
           {#if canManageAttendance}
 
             <div
@@ -2575,7 +2667,7 @@
                 </option>
 
 
-                {#each santriUsers as santri}
+                {#each attendanceStudents as santri}
 
                   <option
                     value={santri.id}
@@ -2637,11 +2729,7 @@
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "hadir"
-                  ).length
+                  attendanceGroupSummary.hadir
                 }
               </strong>
 
@@ -2658,11 +2746,7 @@
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "izin"
-                  ).length
+                  attendanceGroupSummary.izin
                 }
               </strong>
 
@@ -2679,11 +2763,7 @@
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "sakit"
-                  ).length
+                  attendanceGroupSummary.sakit
                 }
               </strong>
 
@@ -2700,11 +2780,7 @@
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "alpha"
-                  ).length
+                  attendanceGroupSummary.alpha
                 }
               </strong>
 
@@ -2748,7 +2824,7 @@
 
               <tbody>
 
-                {#each santriUsers as santri}
+                {#each attendanceStudents as santri}
 
                   {@const attendance =
                     getAttendance(
@@ -2889,6 +2965,10 @@
                           <div class="schedule-main-info">
                             <strong class="schedule-subject">
                               {schedule.subject}
+                              {#if schedule.subject2}
+                                <span class="subject-separator"> + </span>
+                                {schedule.subject2}
+                              {/if}
                             </strong>
 
                             <span class="schedule-teacher">
@@ -3733,16 +3813,39 @@
       >
 
         <label>
-          Mata Pelajaran
+          Mata Pelajaran 1
         </label>
 
         <input
           type="text"
-          placeholder="Contoh: Tahfidz"
+          placeholder="Contoh: Matematika"
           bind:value={
             scheduleSubject
           }
         />
+
+      </div>
+
+
+      <div
+        class="form-group-modal"
+      >
+
+        <label>
+          Mata Pelajaran 2 (Opsional)
+        </label>
+
+        <input
+          type="text"
+          placeholder="Contoh: IPA"
+          bind:value={
+            scheduleSubject2
+          }
+        />
+
+        <small class="form-help">
+          Jika diisi, kedua mata pelajaran akan digabung dalam satu jadwal.
+        </small>
 
       </div>
 
@@ -5709,6 +5812,84 @@
      ATTENDANCE
   ========================= */
 
+  .attendance-group-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin: 18px 0 14px;
+  }
+
+  .attendance-group-tab {
+    border: 1px solid #dbe3ef;
+    background: #f8fafc;
+    border-radius: 14px;
+    padding: 13px 14px;
+    cursor: pointer;
+    text-align: left;
+    transition: 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .attendance-group-tab span {
+    font-size: 16px;
+    font-weight: 800;
+  }
+
+  .attendance-group-tab small {
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .attendance-group-tab:hover {
+    transform: translateY(-1px);
+    border-color: #94a3b8;
+  }
+
+  .attendance-group-tab.active {
+    background: #eff6ff;
+    border-color: #2563eb;
+    box-shadow: 0 5px 16px rgba(37, 99, 235, 0.12);
+  }
+
+  .attendance-group-tab.active span {
+    color: #1d4ed8;
+  }
+
+  .attendance-group-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 8px 0 14px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+  }
+
+  .attendance-group-title > div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .attendance-group-title strong {
+    font-size: 16px;
+  }
+
+  .attendance-group-title span {
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .attendance-student-count {
+    white-space: nowrap;
+    font-weight: 700;
+    color: #1d4ed8 !important;
+  }
+
   .attendance-date-box {
 
     display:
@@ -6842,6 +7023,20 @@
     }
 
 
+    .attendance-group-tabs {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .attendance-group-tab {
+      padding: 11px 12px;
+    }
+
+    .attendance-group-title {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
     .attendance-summary {
 
       grid-template-columns:
@@ -7188,6 +7383,11 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
+  }
+
+  .subject-separator {
+    opacity: 0.65;
+    margin: 0 2px;
   }
 
   .schedule-subject {
