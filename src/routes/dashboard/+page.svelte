@@ -16,6 +16,12 @@
     password_hash?: string;
     role: "admin" | "santri" | "ustad";
     class_name: string | null;
+    class_id: number | null;
+  }
+
+  interface UserClass {
+    id: number;
+    name: string;
   }
 
   interface Entry {
@@ -118,10 +124,14 @@
      SCHEDULE OPTIONS
   ========================= */
 
+  // Tetap dipakai oleh modul jadwal yang masih menggunakan nama kelas.
   const classOptions = [
     "Kelas 1", "Kelas 2", "Kelas 3",
     "Kelas 4", "Kelas 5", "Kelas 6", "Kelas 7", "Kelas 8", "Kelas 9", "Kelas 10", "Kelas 11", "Kelas 12", "SMA", "SMP", "SD"
   ];
+
+  // Pilihan kelas untuk User memakai ID dari tabel `classes`.
+  let userClassOptions: UserClass[] = [];
 
   const subjectOptions = [
     "None",
@@ -202,6 +212,7 @@
   let formEmail = "";
   let formPassword = "";
   let formConfirmPassword = "";
+  let formClassId: number | null = null;
   let formClassName = "";
 
   let formRole:
@@ -321,6 +332,7 @@
     }
 
     await Promise.all([
+      loadClasses(),
       loadUsers(),
       loadEntries(),
       loadSPPData(),
@@ -432,11 +444,33 @@
      LOAD USERS
   ========================= */
 
+  async function loadClasses() {
+    // Mengambil seluruh kolom agar tetap kompatibel jika tabel `classes`
+    // memakai `name` atau `class_name` sebagai kolom nama kelas.
+    const { data, error } = await supabase
+      .from("classes")
+      .select("*")
+      .order("id", { ascending: true });
+
+    if (error) {
+      showToast("Gagal memuat kelas: " + error.message, true);
+      userClassOptions = [];
+      return;
+    }
+
+    userClassOptions = (data || [])
+      .map((row: any) => ({
+        id: Number(row.id),
+        name: String(row.name ?? row.class_name ?? row.nama ?? `Kelas ${row.id}`)
+      }))
+      .filter((kelas) => Number.isFinite(kelas.id) && kelas.name);
+  }
+
   async function loadUsers() {
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, full_name, username, email, role, class_name")
+      .select("id, full_name, username, email, role, class_name, class_id")
       .order("username", { ascending: true });
 
     if (error) {
@@ -827,6 +861,14 @@
      USER MODAL
   ========================= */
 
+  function handleRoleChange() {
+    // Kelas hanya berlaku untuk santri.
+    if (formRole !== "santri") {
+      formClassId = null;
+      formClassName = "";
+    }
+  }
+
   function resetUserForm() {
     editingUserId = null;
     formFullName = "";
@@ -834,6 +876,7 @@
     formEmail = "";
     formPassword = "";
     formConfirmPassword = "";
+    formClassId = null;
     formClassName = "";
     formRole = "santri";
   }
@@ -861,6 +904,14 @@
     formPassword = "";
     formConfirmPassword = "";
     formRole = user.role;
+
+    // Utamakan class_id. Jika data lama belum memiliki class_id,
+    // coba cari ID berdasarkan class_name agar form tetap bisa diedit.
+    formClassId =
+      user.class_id ??
+      userClassOptions.find((kelas) => kelas.name === user.class_name)?.id ??
+      null;
+
     formClassName = user.class_name || "";
     showUserModal = true;
   }
@@ -878,14 +929,31 @@
     const email = formEmail.trim().toLowerCase();
     const password = formPassword;
     const confirmPassword = formConfirmPassword;
-    const class_name = formRole === "santri" ? formClassName.trim() : null;
+
+    // class_id adalah sumber utama relasi user -> kelas.
+    const class_id =
+      formRole === "santri" && formClassId !== null
+        ? Number(formClassId)
+        : null;
+
+    // class_name tetap disinkronkan agar modul lama yang masih membaca
+    // users.class_name tetap berjalan tanpa perubahan besar.
+    const selectedClass =
+      class_id !== null
+        ? userClassOptions.find((kelas) => kelas.id === class_id)
+        : null;
+
+    const class_name =
+      formRole === "santri"
+        ? (selectedClass?.name || formClassName.trim() || null)
+        : null;
 
     if (!full_name || !username || !email) {
       showToast("❌ Nama lengkap, username, dan email wajib diisi.", true);
       return;
     }
 
-    if (formRole === "santri" && !class_name) {
+    if (formRole === "santri" && class_id === null) {
       showToast("❌ Kelas wajib dipilih untuk santri.", true);
       return;
     }
@@ -957,6 +1025,7 @@
           username,
           email,
           role: formRole,
+          class_id,
           class_name
         };
 
@@ -982,6 +1051,7 @@
             email,
             password_hash,
             role: formRole,
+            class_id,
             class_name
           }]);
 
@@ -2855,6 +2925,9 @@ async function deleteUser(
                     <td>
                       {#if user.class_name}
                         <span class="class-badge">🏫 {user.class_name}</span>
+                        {#if user.class_id !== null}
+                          <small class="form-hint" style="display:block; margin-top:4px;">ID Kelas: {user.class_id}</small>
+                        {/if}
                       {:else}
                         <span class="text-muted">—</span>
                       {/if}
@@ -3847,7 +3920,7 @@ async function deleteUser(
 
       <div class="form-group-modal">
         <label for="user-role">Role</label>
-        <select id="user-role" bind:value={formRole} disabled={isSavingUser}>
+        <select id="user-role" bind:value={formRole} on:change={handleRoleChange} disabled={isSavingUser}>
           <option value="santri">Santri</option>
           <option value="ustad">Ustad / Pengajar</option>
           <option value="admin">Admin</option>
@@ -3857,13 +3930,13 @@ async function deleteUser(
       {#if formRole === "santri"}
         <div class="form-group-modal">
           <label for="user-class">Kelas <span class="required-mark">*</span></label>
-          <select id="user-class" bind:value={formClassName} disabled={isSavingUser}>
-            <option value="">-- Pilih Kelas --</option>
-            {#each classOptions as className}
-              <option value={className}>{className}</option>
+          <select id="user-class" bind:value={formClassId} disabled={isSavingUser}>
+            <option value={null}>-- Pilih Kelas --</option>
+            {#each userClassOptions as kelas}
+              <option value={kelas.id}>{kelas.name}</option>
             {/each}
           </select>
-          <small class="form-hint">Pilih kelas santri dari daftar yang tersedia.</small>
+          <small class="form-hint">Kelas disimpan berdasarkan ID dari tabel classes.</small>
         </div>
       {/if}
 
