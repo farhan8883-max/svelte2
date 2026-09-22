@@ -2293,7 +2293,7 @@
       <div>
 
         <h2>
-          Ustadz
+          Pengajar
         </h2>
 
         <p>
@@ -2541,7 +2541,7 @@
           <div class="bca-card saldo-card teacher-card">
             <div class="card-top-row">
               <span class="card-label">ustad / Ustadzah</span>
-              <span class="badge-brand">USTAD</span>
+              <span class="badge-brand">Pengajar</span>
             </div>
 
             <div class="teacher-profile-card">
