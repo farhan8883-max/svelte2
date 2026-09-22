@@ -95,6 +95,23 @@
 
   let message = "";
 
+  /* =========================================================
+     NOTIFIKASI UPDATE ADMIN / USTAD
+  ========================================================= */
+
+  interface AppNotification {
+    id: string;
+    title: string;
+    text: string;
+    section: typeof activeSection;
+    created_at: string;
+  }
+
+  let notifications: AppNotification[] = [];
+  let unreadNotificationCount = 0;
+  let showNotifications = false;
+  let notificationChannel: ReturnType<typeof supabase.channel> | null = null;
+
   let loadingEntries = false;
   let loadingAbsensi = false;
   let loadingSPP = false;
@@ -223,6 +240,217 @@
   });
 
   /* =========================================================
+     NOTIFICATION HELPERS
+  ========================================================= */
+
+  function getNotificationStorageKey() {
+    return `mySantri_notifications_seen_${user?.id || "guest"}`;
+  }
+
+  function getSeenNotificationIds(): string[] {
+    if (typeof window === "undefined") return [];
+
+    try {
+      return JSON.parse(
+        localStorage.getItem(getNotificationStorageKey()) || "[]"
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  function saveSeenNotificationIds(ids: string[]) {
+    if (typeof window === "undefined") return;
+
+    localStorage.setItem(
+      getNotificationStorageKey(),
+      JSON.stringify(ids.slice(-200))
+    );
+  }
+
+  function refreshUnreadCount() {
+    const seen = new Set(getSeenNotificationIds());
+
+    unreadNotificationCount = notifications.filter(
+      (item) => !seen.has(item.id)
+    ).length;
+  }
+
+  function addNotification(
+    id: string,
+    title: string,
+    text: string,
+    section: typeof activeSection,
+    createdAt = new Date().toISOString()
+  ) {
+    if (notifications.some((item) => item.id === id)) return;
+
+    notifications = [
+      {
+        id,
+        title,
+        text,
+        section,
+        created_at: createdAt
+      },
+      ...notifications
+    ].slice(0, 30);
+
+    refreshUnreadCount();
+  }
+
+  function markNotificationsAsRead() {
+    saveSeenNotificationIds([
+      ...new Set([
+        ...getSeenNotificationIds(),
+        ...notifications.map((item) => item.id)
+      ])
+    ]);
+
+    unreadNotificationCount = 0;
+  }
+
+  function toggleNotifications() {
+    // Membuka panel tidak langsung menghilangkan tanda merah,
+    // supaya perilakunya seperti notice/message Instagram.
+    showNotifications = !showNotifications;
+  }
+
+  async function openNotification(item: AppNotification) {
+    showNotifications = false;
+    await switchSection(item.section);
+  }
+
+  function setupRealtimeNotifications() {
+    if (!user?.id || notificationChannel) return;
+
+    notificationChannel = supabase
+      .channel(`mysantri-notifications-${user.id}`, {
+        config: {
+          broadcast: { self: false },
+          presence: { key: String(user.id) }
+        }
+      })
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "announcements"
+        },
+        (payload) => {
+          const row = (payload.new || {}) as Record<string, any>;
+
+          addNotification(
+            `announcement-${row.id || "update"}-${Date.now()}`,
+            payload.eventType === "INSERT"
+              ? "Pengumuman baru"
+              : "Pengumuman diperbarui",
+            row.title || "Ada informasi terbaru dari pengurus pesantren.",
+            "pengumuman",
+            row.created_at || new Date().toISOString()
+          );
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "attendance",
+          filter: `user_id=eq.${user.id}`
+        },
+        (payload) => {
+          const row = (payload.new || {}) as Record<string, any>;
+
+          addNotification(
+            `attendance-${row.id || "update"}-${Date.now()}`,
+            payload.eventType === "INSERT"
+              ? "Absensi baru"
+              : "Absensi diperbarui",
+            `Status absensi kamu: ${row.status || "diperbarui"}.`,
+            "absensi"
+          );
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "student_grades",
+          filter: `user_id=eq.${user.id}`
+        },
+        (payload) => {
+          const row = (payload.new || {}) as Record<string, any>;
+
+          addNotification(
+            `grade-${row.id || "update"}-${Date.now()}`,
+            payload.eventType === "INSERT"
+              ? "Nilai baru"
+              : "Nilai diperbarui",
+            row.subject
+              ? `Nilai ${row.subject} baru saja diperbarui.`
+              : "Ada pembaruan nilai akademik.",
+            "nilai"
+          );
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "entries",
+          filter: `user_id=eq.${user.id}`
+        },
+        (payload) => {
+          const row = (payload.new || {}) as Record<string, any>;
+
+          addNotification(
+            `entry-${row.id || "update"}-${Date.now()}`,
+            payload.eventType === "INSERT"
+              ? "Keuangan diperbarui"
+              : "Transaksi diperbarui",
+            row.name
+              ? `${row.name} — Rp ${formatRupiah(Number(row.amount || 0))}`
+              : "Ada perubahan pada data keuangan.",
+            "keuangan"
+          );
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "spp_payments",
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          addNotification(
+            `spp-${user.id}-${Date.now()}`,
+            "SPP diperbarui",
+            "Ada perubahan pada data pembayaran SPP kamu.",
+            "spp"
+          );
+        }
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          console.log("Realtime notifikasi aktif.");
+        }
+      });
+  }
+
+  function cleanupRealtimeNotifications() {
+    if (notificationChannel) {
+      supabase.removeChannel(notificationChannel);
+      notificationChannel = null;
+    }
+  }
+
+  /* =========================================================
      ON MOUNT
   ========================================================= */
 
@@ -241,6 +469,12 @@
       loadPengumuman(),
       loadNilai()
     ]);
+
+    setupRealtimeNotifications();
+
+    return () => {
+      cleanupRealtimeNotifications();
+    };
   });
 
   /* =========================================================
@@ -932,6 +1166,70 @@
 
       </div>
 
+      <div class="notification-wrapper">
+        <button
+          class="notification-button"
+          class:has-unread={unreadNotificationCount > 0}
+          on:click={toggleNotifications}
+          title="Notifikasi"
+          aria-label="Notifikasi"
+        >
+          <span class="notification-bell">🔔</span>
+
+          {#if unreadNotificationCount > 0}
+            <span class="notification-badge">
+              {unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}
+            </span>
+          {/if}
+        </button>
+
+        {#if showNotifications}
+          <div class="notification-panel">
+            <div class="notification-panel-header">
+              <div>
+                <strong>Notifikasi</strong>
+                <span>Update dari admin & ustad</span>
+              </div>
+
+              {#if notifications.length > 0}
+                <button
+                  class="notification-clear"
+                  on:click={markNotificationsAsRead}
+                >
+                  Sudah dibaca
+                </button>
+              {/if}
+            </div>
+
+            <div class="notification-list">
+              {#if notifications.length === 0}
+                <div class="notification-empty">
+                  <div class="notification-empty-icon">🔔</div>
+                  <strong>Belum ada notifikasi</strong>
+                  <span>Update terbaru akan muncul di sini.</span>
+                </div>
+              {:else}
+                {#each notifications as item}
+                  <button
+                    class="notification-item"
+                    class:unread={!getSeenNotificationIds().includes(item.id)}
+                    on:click={() => openNotification(item)}
+                  >
+                    <span class="notification-dot"></span>
+
+                    <span class="notification-item-content">
+                      <strong>{item.title}</strong>
+                      <span>{item.text}</span>
+                      <small>{formatTanggal(item.created_at)}</small>
+                    </span>
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          </div>
+        {/if}
+      </div>
+
       <button
         class="btn-logout"
         on:click={logout}
@@ -1244,6 +1542,9 @@
 
               <span>
                 Pengumuman
+            {#if unreadNotificationCount > 0}
+              <span class="menu-notification-dot"></span>
+            {/if}
               </span>
 
             </button>
@@ -5022,6 +5323,234 @@
 
 
   /* =====================================================
+     NOTIFICATION - BADGE MERAH SEPERTI INSTAGRAM
+  ====================================================== */
+
+
+  .menu-notification-dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin-left: 7px;
+    border-radius: 50%;
+    background: #ef233c;
+    box-shadow: 0 0 0 3px rgba(239, 35, 60, 0.12);
+    vertical-align: middle;
+    animation: notification-dot-pulse 1.4s infinite;
+  }
+
+  @keyframes notification-dot-pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.15); }
+  }
+
+  .notification-wrapper {
+    position: relative;
+  }
+
+  .notification-button {
+    position: relative;
+    width: 42px;
+    height: 42px;
+    border: none;
+    border-radius: 50%;
+    background: #f8fafc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: 0.2s ease;
+  }
+
+  .notification-button:hover {
+    background: #eef2f7;
+    transform: translateY(-1px);
+  }
+
+  .notification-bell {
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  .notification-badge {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    min-width: 19px;
+    height: 19px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: #ef233c;
+    color: white;
+    border: 2px solid white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    font-weight: 800;
+    line-height: 1;
+    box-sizing: border-box;
+  }
+
+  .notification-button.has-unread .notification-bell {
+    animation: notification-shake 0.7s ease;
+  }
+
+  @keyframes notification-shake {
+    0%, 100% { transform: rotate(0); }
+    20% { transform: rotate(-12deg); }
+    40% { transform: rotate(12deg); }
+    60% { transform: rotate(-8deg); }
+    80% { transform: rotate(8deg); }
+  }
+
+  .notification-panel {
+    position: absolute;
+    top: calc(100% + 12px);
+    right: 0;
+    width: min(390px, calc(100vw - 32px));
+    max-height: 470px;
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 18px;
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.16);
+    overflow: hidden;
+    z-index: 1000;
+  }
+
+  .notification-panel-header {
+    padding: 16px 18px;
+    border-bottom: 1px solid #f1f5f9;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .notification-panel-header > div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .notification-panel-header strong {
+    color: #0f172a;
+    font-size: 1rem;
+  }
+
+  .notification-panel-header span {
+    color: #94a3b8;
+    font-size: 0.72rem;
+  }
+
+  .notification-clear {
+    border: none;
+    background: #eff6ff;
+    color: #1d4ed8;
+    padding: 7px 9px;
+    border-radius: 8px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .notification-list {
+    max-height: 390px;
+    overflow-y: auto;
+  }
+
+  .notification-item {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid #f8fafc;
+    background: white;
+    padding: 13px 16px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.2s ease;
+  }
+
+  .notification-item:hover,
+  .notification-item.unread {
+    background: #f8fbff;
+  }
+
+  .notification-dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    margin-top: 6px;
+    border-radius: 50%;
+    background: transparent;
+  }
+
+  .notification-item.unread .notification-dot {
+    background: #ef233c;
+  }
+
+  .notification-item-content {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .notification-item-content strong {
+    color: #1e293b;
+    font-size: 0.8rem;
+  }
+
+  .notification-item-content span {
+    color: #64748b;
+    font-size: 0.74rem;
+    line-height: 1.4;
+  }
+
+  .notification-item-content small {
+    color: #94a3b8;
+    font-size: 0.65rem;
+    margin-top: 2px;
+  }
+
+  .notification-empty {
+    min-height: 180px;
+    padding: 25px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 6px;
+  }
+
+  .notification-empty-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: #f8fafc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    margin-bottom: 4px;
+  }
+
+  .notification-empty strong {
+    color: #334155;
+    font-size: 0.85rem;
+  }
+
+  .notification-empty span {
+    color: #94a3b8;
+    font-size: 0.72rem;
+  }
+
+
+  /* =====================================================
      ALERT
   ====================================================== */
 
@@ -5110,6 +5639,19 @@
     max-width:
       767px
   ) {
+
+    .notification-panel {
+      position: fixed;
+      top: 68px;
+      right: 12px;
+      left: 12px;
+      width: auto;
+      max-height: calc(100vh - 84px);
+    }
+
+    .notification-list {
+      max-height: calc(100vh - 170px);
+    }
 
     .logout-text {
       display:
