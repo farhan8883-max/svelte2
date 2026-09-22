@@ -207,6 +207,9 @@
   let showUserModal = false;
   let editingUserId: number | null = null;
 
+  // Pencarian khusus halaman Kelola User.
+  let userManagementSearch = "";
+
   let formFullName = "";
   let formUsername = "";
   let formEmail = "";
@@ -251,6 +254,11 @@
   let selectedAttendanceUser = "";
   let attendanceClassFilter = "";
   let attendanceSearch = "";
+
+  // Jenjang absensi dibuat terpisah agar saat tombol SD/SMP/SMA diklik
+  // hanya santri pada jenjang tersebut yang ditampilkan.
+  let attendanceSection: "SD" | "SMP" | "SMA" = "SD";
+  let attendanceSmpClass = "";
 
   let attendanceStatus:
     | "hadir"
@@ -357,36 +365,53 @@
 
     const value = className.trim().toLowerCase();
 
-    if ([
-      "kelas 1", "kelas 2", "kelas 3",
-      "kelas 4", "kelas 5", "kelas 6", "sd"
-    ].includes(value)) return "SD";
+    // Mendukung nama kelas lama seperti "Kelas 1" dan juga nama yang
+    // mengandung jenjang, misalnya "SD Kelas 1" / "SMA Kelas 10".
+    if (/\b(kelas\s*)?[1-6]\b/.test(value) || /\bsd\b/.test(value)) {
+      return "SD";
+    }
 
-    if ([
-      "kelas 7", "kelas 8", "kelas 9", "smp"
-    ].includes(value)) return "SMP";
+    if (/\b(kelas\s*)?[7-9]\b/.test(value) || /\bsmp\b/.test(value)) {
+      return "SMP";
+    }
 
-    if ([
-      "kelas 10", "kelas 11", "kelas 12", "sma"
-    ].includes(value)) return "SMA";
+    if (/\b(kelas\s*)?(10|11|12)\b/.test(value) || /\bsma\b/.test(value)) {
+      return "SMA";
+    }
 
     return className;
   }
 
   $: filteredAttendanceSantri =
     santriUsers.filter(user => {
-      const levelMatch =
-        !attendanceClassFilter ||
-        getSchoolLevel(user.class_name) === attendanceClassFilter;
+      const className = (user.class_name || "").trim().toLowerCase();
+      const schoolLevel = getSchoolLevel(user.class_name);
+
+      // Hanya tampilkan santri dari jenjang yang sedang dipilih.
+      let sectionMatch = schoolLevel === attendanceSection;
+
+      // Untuk SMP, pengguna tetap bisa memilih Kelas 1/2/3.
+      if (attendanceSection === "SMP" && attendanceSmpClass) {
+        const smpClassMap: Record<string, string[]> = {
+          "1": ["kelas 7", "7", "smp 1", "smp kelas 1"],
+          "2": ["kelas 8", "8", "smp 2", "smp kelas 2"],
+          "3": ["kelas 9", "9", "smp 3", "smp kelas 3"]
+        };
+
+        const allowedNames = smpClassMap[attendanceSmpClass] || [];
+        sectionMatch =
+          sectionMatch &&
+          allowedNames.some(name => className === name || className.endsWith(` ${name}`));
+      }
 
       const keyword = attendanceSearch.trim().toLowerCase();
       const searchMatch =
         !keyword ||
-        user.full_name.toLowerCase().includes(keyword) ||
-        user.username.toLowerCase().includes(keyword) ||
-        (user.class_name || "").toLowerCase().includes(keyword);
+        (user.full_name || "").toLowerCase().includes(keyword) ||
+        (user.username || "").toLowerCase().includes(keyword) ||
+        className.includes(keyword);
 
-      return levelMatch && searchMatch;
+      return sectionMatch && searchMatch;
     });
 
   $: ustadUsers =
@@ -401,6 +426,24 @@
     selectedRole
       ? users.filter(user => user.role === selectedRole)
       : [];
+
+  // Data yang ditampilkan pada Kelola User mengikuti kata pencarian.
+  // Pencarian mencakup nama, username, email, role, kelas, dan ID user.
+  $: filteredManagedUsers = users.filter(user => {
+    const keyword = userManagementSearch.trim().toLowerCase();
+
+    if (!keyword) return true;
+
+    return [
+      user.id?.toString() || "",
+      user.full_name || "",
+      user.username || "",
+      user.email || "",
+      user.role || "",
+      user.class_name || "",
+      user.class_id?.toString() || ""
+    ].some(value => value.toLowerCase().includes(keyword));
+  });
 
   $: filteredSantri =
     santriUsers.filter(
@@ -1840,7 +1883,26 @@ async function deleteUser(
 
     selectedAttendanceUser = String(santri.id);
     attendanceSearch = santri.full_name || santri.username;
-    attendanceClassFilter = getSchoolLevel(santri.class_name);
+
+    const scannedLevel = getSchoolLevel(santri.class_name);
+
+    if (scannedLevel === "SMP") {
+      attendanceSection = "SMP";
+      const scannedClass = (santri.class_name || "").trim().toLowerCase();
+
+      if (/\bkelas\s*7\b|\bsmp\s*1\b/.test(scannedClass)) attendanceSmpClass = "1";
+      else if (/\bkelas\s*8\b|\bsmp\s*2\b/.test(scannedClass)) attendanceSmpClass = "2";
+      else if (/\bkelas\s*9\b|\bsmp\s*3\b/.test(scannedClass)) attendanceSmpClass = "3";
+      else attendanceSmpClass = "";
+    } else if (scannedLevel === "SMA") {
+      attendanceSection = "SMA";
+      attendanceSmpClass = "";
+    } else {
+      attendanceSection = "SD";
+      attendanceSmpClass = "";
+    }
+
+    attendanceClassFilter = scannedLevel;
     activeView = "attendance";
 
     await stopQrScanner();
@@ -2837,6 +2899,40 @@ async function deleteUser(
 
 
           <div
+            class="control-card-inline user-management-search"
+          >
+
+            <div class="search-box">
+
+              <span>🔍</span>
+
+              <input
+                type="text"
+                placeholder="Cari user, nama, username, role, kelas..."
+                bind:value={userManagementSearch}
+              />
+
+              {#if userManagementSearch}
+                <button
+                  type="button"
+                  class="search-clear-btn"
+                  title="Hapus pencarian"
+                  on:click={() => userManagementSearch = ""}
+                >
+                  ✕
+                </button>
+              {/if}
+
+            </div>
+
+            <div class="user-search-result-count">
+              Menampilkan <strong>{filteredManagedUsers.length}</strong> dari <strong>{users.length}</strong> user
+            </div>
+
+          </div>
+
+
+          <div
             class="table-responsive"
           >
 
@@ -2875,7 +2971,21 @@ async function deleteUser(
 
               <tbody>
 
-                {#each users as user}
+                {#if filteredManagedUsers.length === 0}
+
+                  <tr>
+                    <td colspan="5" class="empty-cell">
+                      {#if userManagementSearch}
+                        User dengan kata "{userManagementSearch}" tidak ditemukan.
+                      {:else}
+                        Belum ada user.
+                      {/if}
+                    </td>
+                  </tr>
+
+                {:else}
+
+                  {#each filteredManagedUsers as user}
 
                   <tr>
 
@@ -2964,7 +3074,9 @@ async function deleteUser(
 
                   </tr>
 
-                {/each}
+                  {/each}
+
+                {/if}
 
               </tbody>
 
@@ -3044,17 +3156,110 @@ async function deleteUser(
               class="attendance-form"
             >
 
-              <select
-                bind:value={attendanceClassFilter}
-                on:change={() => {
-                  selectedAttendanceUser = "";
-                }}
-              >
-                <option value="">-- Semua Jenjang --</option>
-                <option value="SD">SD (Kelas 1–6)</option>
-                <option value="SMP">SMP (Kelas 7–9)</option>
-                <option value="SMA">SMA (Kelas 10–12)</option>
-              </select>
+              <div class="attendance-section-filter">
+                <div class="attendance-section-label">
+                  Jenjang Absensi
+                </div>
+
+                <div class="attendance-section-buttons">
+                  <button
+                    type="button"
+                    class:active={attendanceSection === "SD"}
+                    on:click={() => {
+                      attendanceSection = "SD";
+                      attendanceSmpClass = "";
+                      attendanceClassFilter = "SD";
+                      selectedAttendanceUser = "";
+                    }}
+                  >
+                    🏫 SD
+                  </button>
+
+                  <button
+                    type="button"
+                    class:active={attendanceSection === "SMP"}
+                    on:click={() => {
+                      attendanceSection = "SMP";
+                      attendanceSmpClass = "";
+                      attendanceClassFilter = "SMP";
+                      selectedAttendanceUser = "";
+                    }}
+                  >
+                    🎓 SMP
+                  </button>
+
+                  <button
+                    type="button"
+                    class:active={attendanceSection === "SMA"}
+                    on:click={() => {
+                      attendanceSection = "SMA";
+                      attendanceSmpClass = "";
+                      attendanceClassFilter = "SMA";
+                      selectedAttendanceUser = "";
+                    }}
+                  >
+                    🎓 SMA
+                  </button>
+                </div>
+
+                {#if attendanceSection === "SMP"}
+                  <div class="attendance-smp-classes">
+                    <div class="attendance-smp-title">
+                      Kelas SMP
+                    </div>
+
+                    <div class="attendance-smp-buttons">
+                      <button
+                        type="button"
+                        class:active={attendanceSmpClass === "1"}
+                        on:click={() => {
+                          attendanceSmpClass = "1";
+                          attendanceClassFilter = "SMP";
+                          selectedAttendanceUser = "";
+                        }}
+                      >
+                        Kelas 1
+                      </button>
+
+                      <button
+                        type="button"
+                        class:active={attendanceSmpClass === "2"}
+                        on:click={() => {
+                          attendanceSmpClass = "2";
+                          attendanceClassFilter = "SMP";
+                          selectedAttendanceUser = "";
+                        }}
+                      >
+                        Kelas 2
+                      </button>
+
+                      <button
+                        type="button"
+                        class:active={attendanceSmpClass === "3"}
+                        on:click={() => {
+                          attendanceSmpClass = "3";
+                          attendanceClassFilter = "SMP";
+                          selectedAttendanceUser = "";
+                        }}
+                      >
+                        Kelas 3
+                      </button>
+
+                      <button
+                        type="button"
+                        class:clear={attendanceSmpClass === ""}
+                        on:click={() => {
+                          attendanceSmpClass = "";
+                          attendanceClassFilter = "SMP";
+                          selectedAttendanceUser = "";
+                        }}
+                      >
+                        Semua SMP
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
 
               <input
                 class="attendance-search"
@@ -3134,10 +3339,8 @@ async function deleteUser(
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "hadir"
+                  filteredAttendanceSantri.filter(
+                    santri => getAttendance(santri.id)?.status === "hadir"
                   ).length
                 }
               </strong>
@@ -3155,10 +3358,8 @@ async function deleteUser(
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "izin"
+                  filteredAttendanceSantri.filter(
+                    santri => getAttendance(santri.id)?.status === "izin"
                   ).length
                 }
               </strong>
@@ -3176,10 +3377,8 @@ async function deleteUser(
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "sakit"
+                  filteredAttendanceSantri.filter(
+                    santri => getAttendance(santri.id)?.status === "sakit"
                   ).length
                 }
               </strong>
@@ -3197,10 +3396,8 @@ async function deleteUser(
 
               <strong>
                 {
-                  attendanceData.filter(
-                    item =>
-                      item.status ===
-                      "alpha"
+                  filteredAttendanceSantri.filter(
+                    santri => getAttendance(santri.id)?.status === "alpha"
                   ).length
                 }
               </strong>
@@ -3245,7 +3442,14 @@ async function deleteUser(
 
               <tbody>
 
-                {#each santriUsers as santri}
+                {#if filteredAttendanceSantri.length === 0}
+                  <tr>
+                    <td colspan="3" class="empty-cell">
+                      Tidak ada santri pada jenjang {attendanceSection}{attendanceSection === "SMP" && attendanceSmpClass ? ` Kelas ${attendanceSmpClass}` : ""}.
+                    </td>
+                  </tr>
+                {:else}
+                  {#each filteredAttendanceSantri as santri}
 
                   {@const attendance =
                     getAttendance(
@@ -3318,7 +3522,8 @@ async function deleteUser(
 
                   </tr>
 
-                {/each}
+                  {/each}
+                {/if}
 
               </tbody>
 
@@ -4163,6 +4368,78 @@ async function deleteUser(
 
 
 <style>
+
+  /* ===== FILTER JENJANG ABSENSI ===== */
+  .attendance-section-filter {
+    width: 100%;
+    margin-bottom: 18px;
+    padding: 16px;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    background: #f8fafc;
+  }
+
+  .attendance-section-label {
+    margin-bottom: 10px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #334155;
+  }
+
+  .attendance-section-buttons,
+  .attendance-smp-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+  }
+
+  .attendance-section-buttons button,
+  .attendance-smp-buttons button {
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    background: #ffffff;
+    color: #334155;
+    padding: 9px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.18s ease;
+  }
+
+  .attendance-section-buttons button:hover,
+  .attendance-smp-buttons button:hover {
+    border-color: #94a3b8;
+    transform: translateY(-1px);
+  }
+
+  .attendance-section-buttons button.active,
+  .attendance-smp-buttons button.active {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #ffffff;
+  }
+
+  .attendance-smp-classes {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #e2e8f0;
+  }
+
+  .attendance-smp-title {
+    margin-bottom: 9px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #475569;
+  }
+
+  @media (max-width: 640px) {
+    .attendance-section-buttons button,
+    .attendance-smp-buttons button {
+      flex: 1 1 auto;
+      min-width: 110px;
+    }
+  }
+
 
   :global(*) {
 
@@ -5429,6 +5706,58 @@ async function deleteUser(
 
     margin-bottom:
       16px;
+
+  }
+
+
+  .user-management-search {
+
+    margin-bottom: 16px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 12px;
+
+    flex-wrap: wrap;
+
+  }
+
+
+  .user-management-search .search-box {
+
+    flex: 1;
+
+    min-width: 260px;
+
+    max-width: 520px;
+
+  }
+
+
+  .search-clear-btn {
+
+    border: none;
+
+    background: transparent;
+
+    cursor: pointer;
+
+    font-size: 14px;
+
+    padding: 2px 4px;
+
+  }
+
+
+  .user-search-result-count {
+
+    color: #64748b;
+
+    font-size: 14px;
 
   }
 
