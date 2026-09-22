@@ -1,7 +1,9 @@
 
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
+  import QRCode from "qrcode";
+  import { Html5Qrcode } from "html5-qrcode";
   import { goto } from "$app/navigation";
 
   /* =========================
@@ -266,6 +268,198 @@
     | "izin"
     | "sakit"
     | "alpha" = "hadir";
+
+  /* =========================
+     QR ATTENDANCE SCANNER
+  ========================= */
+
+  let qrCodes: Record<number, string> = {};
+  let qrScanner: Html5Qrcode | null = null;
+  let qrScannerRunning = false;
+  let qrScanBusy = false;
+  let lastScannedPayload = "";
+  let lastScannedStudent: User | null = null;
+  let qrScanMessage = "";
+
+  async function generateQRCode(userId: number) {
+    try {
+      return await QRCode.toDataURL(`SANTRI:${userId}`, {
+        width: 280,
+        margin: 2,
+        errorCorrectionLevel: "H",
+        type: "image/png"
+      });
+    } catch (error) {
+      console.error("Gagal membuat QR Code:", error);
+      return "";
+    }
+  }
+
+  async function generateAllQRCodes() {
+    const result: Record<number, string> = {};
+
+    for (const santri of santriUsers) {
+      result[santri.id] = await generateQRCode(santri.id);
+    }
+
+    qrCodes = result;
+  }
+
+  function parseSantriQr(payload: string) {
+    const value = payload.trim();
+
+    if (!value.toUpperCase().startsWith("SANTRI:")) return null;
+
+    const id = Number(value.slice(7).trim());
+    if (!Number.isInteger(id) || id <= 0) return null;
+
+    return id;
+  }
+
+  async function saveAttendanceFromQR(userId: number) {
+    if (!canManageAttendance) {
+      showToast("Hanya admin atau ustad yang dapat mengisi absensi.", true);
+      return false;
+    }
+
+    const santri = santriUsers.find(user => user.id === userId);
+
+    if (!santri) {
+      showToast("QR Code bukan milik santri yang terdaftar.", true);
+      return false;
+    }
+
+    const existing = getAttendance(userId);
+
+    if (existing?.id) {
+      if (existing.status === "hadir") {
+        showToast(`${santri.full_name || santri.username} sudah absen hadir hari ini.`, true);
+        return false;
+      }
+
+      const { error } = await supabase
+        .from("attendance")
+        .update({ status: "hadir" })
+        .eq("id", existing.id);
+
+      if (error) {
+        showToast("Gagal memperbarui absensi: " + error.message, true);
+        return false;
+      }
+    } else {
+      const { error } = await supabase
+        .from("attendance")
+        .insert([{
+          user_id: userId,
+          date: attendanceDate,
+          status: "hadir"
+        }]);
+
+      if (error) {
+        showToast("Gagal menyimpan absensi QR: " + error.message, true);
+        return false;
+      }
+    }
+
+    lastScannedStudent = santri;
+    qrScanMessage = `✓ ${santri.full_name || santri.username} berhasil absen hadir.`;
+    showToast(qrScanMessage);
+    await loadAttendance();
+    return true;
+  }
+
+  async function handleQRCode(decodedText: string) {
+    if (qrScanBusy) return;
+
+    const payload = decodedText.trim();
+    if (!payload || payload === lastScannedPayload) return;
+
+    const userId = parseSantriQr(payload);
+
+    if (!userId) {
+      lastScannedPayload = payload;
+      qrScanMessage = "QR tidak dikenali. Gunakan QR Code santri dari halaman Barcode Santri.";
+      showToast(qrScanMessage, true);
+      setTimeout(() => {
+        if (lastScannedPayload === payload) lastScannedPayload = "";
+      }, 1800);
+      return;
+    }
+
+    qrScanBusy = true;
+    lastScannedPayload = payload;
+
+    try {
+      await saveAttendanceFromQR(userId);
+    } finally {
+      setTimeout(() => {
+        qrScanBusy = false;
+        lastScannedPayload = "";
+      }, 1800);
+    }
+  }
+
+  async function startQRScanner() {
+    if (qrScannerRunning) return;
+
+    if (!canManageAttendance) {
+      showToast("Hanya admin atau ustad yang dapat menggunakan scanner absensi.", true);
+      return;
+    }
+
+    qrScanMessage = "Meminta izin kamera...";
+
+    try {
+      qrScanner = new Html5Qrcode("qr-reader");
+
+      await qrScanner.start(
+        { facingMode: "environment" },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+          aspectRatio: 1
+        },
+        async (decodedText) => {
+          await handleQRCode(decodedText);
+        },
+        () => {
+          // Frame tanpa QR diabaikan.
+        }
+      );
+
+      qrScannerRunning = true;
+      qrScanMessage = "Kamera aktif. Arahkan ke QR Code santri.";
+    } catch (error) {
+      console.error("Gagal membuka kamera:", error);
+      qrScanner = null;
+      qrScannerRunning = false;
+      qrScanMessage = "Kamera tidak dapat dibuka. Pastikan izin kamera diberikan dan gunakan HTTPS.";
+      showToast(qrScanMessage, true);
+    }
+  }
+
+  async function stopQRScanner() {
+    if (!qrScanner) {
+      qrScannerRunning = false;
+      return;
+    }
+
+    try {
+      if (qrScannerRunning) await qrScanner.stop();
+      await qrScanner.clear();
+    } catch (error) {
+      console.error("Gagal menghentikan scanner:", error);
+    } finally {
+      qrScanner = null;
+      qrScannerRunning = false;
+    }
+  }
+
+  async function restartQRScannerForDate() {
+    lastScannedStudent = null;
+    qrScanMessage = "";
+    await loadAttendance();
+  }
 
   // Kelompok pendidikan dan kelas untuk halaman absensi
   // Setiap jenjang ditampilkan terpisah. Setelah memilih jenjang,
@@ -604,6 +798,8 @@
 
     users =
       (data || []) as User[];
+
+    await generateAllQRCodes();
   }
 
   /* =========================
@@ -1439,7 +1635,8 @@
   }
 
   async function changeAttendanceDate() {
-
+    lastScannedStudent = null;
+    qrScanMessage = "";
     await loadAttendance();
   }
 
@@ -2092,44 +2289,6 @@
     await loadAnnouncements();
   }
 
-  /* =========================
-     BARCODE
-  ========================= */
-
-  function getBarcodeBars(
-    id: number
-  ) {
-
-    const text =
-      String(id);
-
-    const bars:
-      number[] = [];
-
-    for (
-      let i = 0;
-      i < text.length;
-      i++
-    ) {
-
-      const code =
-        text.charCodeAt(i);
-
-      bars.push(
-        2 + (code % 3)
-      );
-
-      bars.push(
-        1 + ((code + i) % 2)
-      );
-
-      bars.push(
-        2 + ((code * 2) % 3)
-      );
-    }
-
-    return bars;
-  }
 
   /* =========================
      TOAST
@@ -2259,13 +2418,31 @@
   async function changeView(
     view: ActiveView
   ) {
+    if (activeView === "attendance" && view !== "attendance") {
+      await stopQRScanner();
+    }
+
     activeView = view;
     sidebarOpen = false;
+
+    if (view === "attendance") {
+      lastScannedStudent = null;
+      qrScanMessage = "";
+      await loadAttendance();
+    }
+
+    if (view === "barcode") {
+      await generateAllQRCodes();
+    }
 
     if (view === "grades") {
       await refreshGradeData();
     }
   }
+
+  onDestroy(() => {
+    void stopQRScanner();
+  });
 </script>
 
 
@@ -2540,7 +2717,7 @@
 
           <div class="bca-card saldo-card teacher-card">
             <div class="card-top-row">
-              <span class="card-label">ustad / Ustadzah</span>
+              <span class="card-label">Ustad / Ustadzah</span>
               <span class="badge-brand">Pengajar</span>
             </div>
 
@@ -2659,6 +2836,53 @@
             />
 
           </div>
+
+
+          {#if canManageAttendance}
+            <div class="qr-attendance-box">
+              <div class="qr-attendance-header">
+                <div>
+                  <h3>📷 Scan QR Santri</h3>
+                  <p>Arahkan kamera ke QR Code santri. Setelah terbaca, absensi otomatis tersimpan sebagai Hadir.</p>
+                </div>
+                {#if qrScannerRunning}
+                  <button class="btn-danger" type="button" on:click={stopQRScanner}>
+                    ⏹ Stop Kamera
+                  </button>
+                {:else}
+                  <button class="btn-primary" type="button" on:click={startQRScanner}>
+                    📷 Mulai Scan
+                  </button>
+                {/if}
+              </div>
+
+              <div id="qr-reader" class:qr-reader-active={qrScannerRunning}></div>
+
+              {#if !qrScannerRunning}
+                <div class="scanner-placeholder">
+                  <div class="scanner-placeholder-icon">📱</div>
+                  <strong>Kamera belum aktif</strong>
+                  <span>Tekan "Mulai Scan" untuk membaca QR santri.</span>
+                </div>
+              {/if}
+
+              {#if qrScanMessage}
+                <div class:success={!!lastScannedStudent} class="qr-scan-message">
+                  {qrScanMessage}
+                </div>
+              {/if}
+
+              {#if lastScannedStudent}
+                <div class="qr-student-result">
+                  <div class="user-avatar">{(lastScannedStudent.full_name || lastScannedStudent.username).charAt(0).toUpperCase()}</div>
+                  <div>
+                    <strong>{lastScannedStudent.full_name || lastScannedStudent.username}</strong>
+                    <span>ID-{lastScannedStudent.id} • Hadir • {attendanceDate}</span>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
 
 
           <div class="attendance-group-tabs">
@@ -3399,14 +3623,13 @@
             <div>
 
               <h3>
-                🆔 Barcode ID Santri
+                🔳 QR Code Santri
               </h3>
 
               <p
                 class="sub-description"
               >
-                Setiap santri memiliki
-                barcode berdasarkan ID.
+                Setiap santri memiliki QR Code unik. Saat dipindai pada halaman absensi, data santri otomatis dicatat hadir.
               </p>
 
             </div>
@@ -3467,26 +3690,23 @@
                   </div>
 
 
-                  <div
-                    class="barcode"
-                  >
-
-                    {#each getBarcodeBars(santri.id) as width}
-
-                      <span
-                        style="width: {width}px"
-                      ></span>
-
-                    {/each}
-
+                  <div class="qr-code-box">
+                    {#if qrCodes[santri.id]}
+                      <img
+                        src={qrCodes[santri.id]}
+                        alt="QR Code {santri.full_name || santri.username}"
+                        class="qr-code-image"
+                      />
+                    {:else}
+                      <div class="qr-loading">Membuat QR...</div>
+                    {/if}
                   </div>
 
-
-                  <div
-                    class="barcode-number"
-                  >
+                  <div class="barcode-number">
                     ID-{santri.id}
                   </div>
+
+                  <div class="qr-payload">SANTRI:{santri.id}</div>
 
                 </div>
 
@@ -6533,129 +6753,167 @@
 
 
   /* =========================
-     BARCODE
+     QR CODE & SCANNER
   ========================= */
 
   .barcode-grid {
-
-    display:
-      grid;
-
-    grid-template-columns:
-      repeat(
-        auto-fit,
-        minmax(
-          230px,
-          1fr
-        )
-      );
-
-    gap:
-      18px;
-
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 18px;
   }
-
 
   .barcode-card {
-
-    border:
-      1px solid
-      #e2e8f0;
-
-    border-radius:
-      14px;
-
-    padding:
-      18px;
-
-    background:
-      #fff;
-
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    padding: 18px;
+    background: #fff;
+    text-align: center;
   }
-
 
   .barcode-user {
-
-    display:
-      flex;
-
-    align-items:
-      center;
-
-    gap:
-      10px;
-
-    margin-bottom:
-      18px;
-
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 16px;
   }
 
-
-  .barcode {
-
-    display:
-      flex;
-
-    align-items:
-      stretch;
-
-    height:
-      80px;
-
-    justify-content:
-      center;
-
-    gap:
-      2px;
-
-    background:
-      white;
-
-    padding:
-      8px;
-
-    border:
-      1px solid
-      #e2e8f0;
-
+  .qr-code-box {
+    min-height: 280px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 10px;
   }
 
-
-  .barcode span {
-
-    display:
-      block;
-
-    height:
-      100%;
-
-    background:
-      #111827;
-
+  .qr-code-image {
+    display: block;
+    width: 260px;
+    height: 260px;
+    max-width: 100%;
+    object-fit: contain;
   }
 
-
-  .barcode-number {
-
-    text-align:
-      center;
-
-    margin-top:
-      10px;
-
-    font-family:
-      monospace;
-
-    font-size:
-      14px;
-
-    letter-spacing:
-      3px;
-
-    font-weight:
-      bold;
-
+  .qr-loading {
+    color: #64748b;
+    font-size: 14px;
   }
+
+  .qr-payload {
+    margin-top: 8px;
+    color: #64748b;
+    font: 12px monospace;
+  }
+
+  .qr-attendance-box {
+    margin: 20px 0;
+    padding: 20px;
+    border: 1px solid #e2e8f0;
+    border-radius: 18px;
+    background: #fff;
+  }
+
+  .qr-attendance-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 15px;
+  }
+
+  .qr-attendance-header h3 {
+    margin: 0 0 5px;
+  }
+
+  .qr-attendance-header p {
+    margin: 0;
+    color: #64748b;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  #qr-reader {
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+    overflow: hidden;
+    border-radius: 16px;
+  }
+
+  #qr-reader video {
+    width: 100% !important;
+    border-radius: 16px;
+  }
+
+  #qr-reader.qr-reader-active {
+    min-height: 280px;
+  }
+
+  .scanner-placeholder {
+    min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    border: 2px dashed #cbd5e1;
+    border-radius: 16px;
+    color: #64748b;
+    text-align: center;
+  }
+
+  .scanner-placeholder-icon {
+    font-size: 48px;
+  }
+
+  .qr-scan-message {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: #fff7ed;
+    color: #9a3412;
+    font-size: 14px;
+  }
+
+  .qr-scan-message.success {
+    background: #ecfdf5;
+    color: #047857;
+  }
+
+  .qr-student-result {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid #bbf7d0;
+    border-radius: 12px;
+    background: #f0fdf4;
+  }
+
+  .qr-student-result strong,
+  .qr-student-result span {
+    display: block;
+  }
+
+  .qr-student-result span {
+    margin-top: 3px;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .btn-danger {
+    border: none;
+    padding: 10px 16px;
+    border-radius: 10px;
+    background: #dc2626;
+    color: #fff;
+    cursor: pointer;
+  }
+
 
 
   /* =========================
