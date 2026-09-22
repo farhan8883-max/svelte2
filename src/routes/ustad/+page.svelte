@@ -267,8 +267,11 @@
     | "sakit"
     | "alpha" = "hadir";
 
-  // Kelompok pendidikan untuk halaman absensi
+  // Kelompok pendidikan dan kelas untuk halaman absensi
+  // Setiap jenjang ditampilkan terpisah. Setelah memilih jenjang,
+  // daftar santri hanya menampilkan kelas yang dipilih.
   let selectedAttendanceGroup: "SD" | "SMP" | "SMA" = "SD";
+  let selectedAttendanceClass = "1";
 
   /* =========================
      SCHEDULE
@@ -368,7 +371,8 @@
     );
 
   function getEducationGroup(user: User): "SD" | "SMP" | "SMA" | null {
-    const classText = `${user.class_name || ""} ${user.kelas || ""}`.toLowerCase();
+    const classRoomName = user.class_name || user.kelas || classes.find(item => item.id === Number(user.class_id))?.name || "";
+    const classText = classRoomName.toLowerCase();
 
     // Jika nama kelas sudah menyebut jenjang, gunakan langsung.
     if (classText.includes("sma") || classText.includes("smk")) return "SMA";
@@ -386,14 +390,60 @@
     return null;
   }
 
-  $: attendanceStudents = santriUsers.filter(
-    santri => getEducationGroup(santri) === selectedAttendanceGroup
-  );
+  function getEducationClassNumber(user: User, group: "SD" | "SMP" | "SMA") {
+    const classRoomName = user.class_name || user.kelas || classes.find(item => item.id === Number(user.class_id))?.name || "";
+    const classText = classRoomName.toLowerCase();
+
+    // Bentuk yang didukung: "SD Kelas 1", "SMP 2", "Kelas 8", "10", dll.
+    const match = classText.match(/(?:kelas\s*)?(\d{1,2})/i);
+    if (!match) return null;
+
+    const rawNumber = Number(match[1]);
+    if (!Number.isFinite(rawNumber)) return null;
+
+    if (group === "SD" && rawNumber >= 1 && rawNumber <= 6) {
+      return String(rawNumber);
+    }
+
+    if (group === "SMP" && rawNumber >= 7 && rawNumber <= 9) {
+      return String(rawNumber - 6);
+    }
+
+    if (group === "SMA" && rawNumber >= 10 && rawNumber <= 12) {
+      return String(rawNumber - 9);
+    }
+
+    // Jika database sudah menyimpan "SMP Kelas 1" / "SMA Kelas 1",
+    // angka tersebut langsung dianggap sebagai kelas 1-3.
+    if ((group === "SMP" || group === "SMA") && rawNumber >= 1 && rawNumber <= 3) {
+      return String(rawNumber);
+    }
+
+    return null;
+  }
+
+  $: attendanceStudents = santriUsers.filter(santri => {
+    const group = getEducationGroup(santri);
+    if (group !== selectedAttendanceGroup) return false;
+    // SD dan SMA digabung. SMP saja yang dipisah kelas 1-3.
+    if (selectedAttendanceGroup !== "SMP") return true;
+    return getEducationClassNumber(santri, "SMP") === selectedAttendanceClass;
+  });
 
   $: attendanceGroupCounts = {
     SD: santriUsers.filter(santri => getEducationGroup(santri) === "SD").length,
     SMP: santriUsers.filter(santri => getEducationGroup(santri) === "SMP").length,
     SMA: santriUsers.filter(santri => getEducationGroup(santri) === "SMA").length
+  };
+
+  $: attendanceClassCounts = {
+    SMP: ["1", "2", "3"].map(kelas => ({
+      kelas,
+      count: santriUsers.filter(santri =>
+        getEducationGroup(santri) === "SMP" &&
+        getEducationClassNumber(santri, "SMP") === kelas
+      ).length
+    }))
   };
 
   $: attendanceGroupData = attendanceStudents.map(santri => ({
@@ -2247,7 +2297,7 @@
         </h2>
 
         <p>
-          Daarulhikam Banking
+          Daarulhikam 
         </p>
 
       </div>
@@ -2490,7 +2540,7 @@
 
           <div class="bca-card saldo-card teacher-card">
             <div class="card-top-row">
-              <span class="card-label">Pengajar / Ustad</span>
+              <span class="card-label">ustad / Ustadzah</span>
               <span class="badge-brand">USTAD</span>
             </div>
 
@@ -2571,8 +2621,8 @@
               <p
                 class="sub-description"
               >
-                Lihat absensi santri
-                berdasarkan tanggal.
+                Pilih jenjang dan kelas untuk melihat
+                absensi santri yang sesuai saja.
               </p>
 
             </div>
@@ -2615,7 +2665,7 @@
             <button
               class:active={selectedAttendanceGroup === "SD"}
               class="attendance-group-tab"
-              on:click={() => { selectedAttendanceGroup = "SD"; selectedAttendanceUser = ""; }}
+              on:click={() => { selectedAttendanceGroup = "SD"; selectedAttendanceClass = "1"; selectedAttendanceUser = ""; }}
             >
               <span>SD</span>
               <small>{attendanceGroupCounts.SD} santri</small>
@@ -2624,7 +2674,7 @@
             <button
               class:active={selectedAttendanceGroup === "SMP"}
               class="attendance-group-tab"
-              on:click={() => { selectedAttendanceGroup = "SMP"; selectedAttendanceUser = ""; }}
+              on:click={() => { selectedAttendanceGroup = "SMP"; selectedAttendanceClass = "1"; selectedAttendanceUser = ""; }}
             >
               <span>SMP</span>
               <small>{attendanceGroupCounts.SMP} santri</small>
@@ -2633,18 +2683,40 @@
             <button
               class:active={selectedAttendanceGroup === "SMA"}
               class="attendance-group-tab"
-              on:click={() => { selectedAttendanceGroup = "SMA"; selectedAttendanceUser = ""; }}
+              on:click={() => { selectedAttendanceGroup = "SMA"; selectedAttendanceClass = "1"; selectedAttendanceUser = ""; }}
             >
               <span>SMA</span>
               <small>{attendanceGroupCounts.SMA} santri</small>
             </button>
           </div>
 
+          {#if selectedAttendanceGroup === "SMP"}
+            <div class="attendance-class-tabs">
+              {#each attendanceClassCounts.SMP as item}
+                <button
+                  type="button"
+                  class:active={selectedAttendanceClass === item.kelas}
+                  class="attendance-class-tab"
+                  on:click={() => { selectedAttendanceClass = item.kelas; selectedAttendanceUser = ""; }}
+                >
+                  <span>Kelas {item.kelas}</span>
+                  <small>{item.count} santri</small>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
 
           <div class="attendance-group-title">
             <div>
-              <strong>Kelompok {selectedAttendanceGroup}</strong>
-              <span>Absensi santri {selectedAttendanceGroup} pada {attendanceDate}</span>
+              <strong>Absensi {selectedAttendanceGroup}{selectedAttendanceGroup === "SMP" ? ` • Kelas ${selectedAttendanceClass}` : ""}</strong>
+              <span>
+                {#if selectedAttendanceGroup === "SMP"}
+                  Absensi santri SMP kelas {selectedAttendanceClass} pada {attendanceDate}
+                {:else}
+                  Absensi seluruh santri {selectedAttendanceGroup} pada {attendanceDate}
+                {/if}
+              </span>
             </div>
             <span class="attendance-student-count">{attendanceStudents.length} santri</span>
           </div>
@@ -3668,7 +3740,7 @@
           </option>
 
           <option value="ustad">
-            Ustad / Pengajar
+            Ustad / Ustadzah
           </option>
 
           <option value="admin">
@@ -5857,6 +5929,51 @@
     color: #1d4ed8;
   }
 
+  .attendance-class-tabs {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 10px;
+    margin: 0 0 14px;
+  }
+
+  .attendance-class-tab {
+    border: 1px solid #dbe3ef;
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 11px 10px;
+    cursor: pointer;
+    text-align: center;
+    transition: 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .attendance-class-tab span {
+    font-size: 14px;
+    font-weight: 800;
+  }
+
+  .attendance-class-tab small {
+    color: #64748b;
+    font-size: 11px;
+  }
+
+  .attendance-class-tab:hover {
+    transform: translateY(-1px);
+    border-color: #94a3b8;
+  }
+
+  .attendance-class-tab.active {
+    background: #f1f5ff;
+    border-color: #2563eb;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.10);
+  }
+
+  .attendance-class-tab.active span {
+    color: #1d4ed8;
+  }
+
   .attendance-group-title {
     display: flex;
     align-items: center;
@@ -7032,6 +7149,11 @@
       padding: 11px 12px;
     }
 
+    .attendance-class-tabs {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
     .attendance-group-title {
       align-items: flex-start;
       flex-direction: column;
@@ -7467,7 +7589,6 @@
       grid-template-columns: 1fr;
     }
   }
-
 
   .small-modal-card {
     max-width: 560px;
