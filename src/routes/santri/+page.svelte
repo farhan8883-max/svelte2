@@ -1,9 +1,17 @@
+<!--
+  Dependency:
+    npm install qrcode
+  If TypeScript asks for types:
+    npm install -D @types/qrcode
+--> 
+
 
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
   import { onMount, tick } from "svelte";
   import { goto } from "$app/navigation";
   import JsBarcode from "jsbarcode";
+  import QRCode from "qrcode";
 
   /* =========================================================
      TYPES
@@ -141,6 +149,81 @@
     | "prestasi"
     | "spp"
     | "nilai" = "home";
+
+  /* =========================================================
+     HOME AD / PROMO BANNER
+  ========================================================= */
+
+  interface BannerItem {
+    image: string;
+    title: string;
+    description: string;
+    buttonText?: string;
+    buttonAction?: () => void;
+  }
+
+  let activeBanner = 0;
+  let bannerInterval: ReturnType<typeof setInterval> | null = null;
+  let isBannerHovered = false;
+
+  const bannerList: BannerItem[] = [
+    {
+      image: "/images/foto.png",
+      title: "Informasi Pesantren",
+      description: "Dapatkan informasi terbaru mengenai kegiatan dan pengumuman santri.",
+      buttonText: "Lihat Pengumuman",
+      buttonAction: () => switchSection("pengumuman")
+    },
+    {
+      image: "/images/foto1.png",
+      title: "Pembayaran SPP",
+      description: "Cek status pembayaran SPP santri dengan cepat dan mudah.",
+      buttonText: "Cek SPP",
+      buttonAction: () => switchSection("spp")
+    },
+    {
+      image: "/images/foto2.png",
+      title: "Prestasi Santri",
+      description: "Lihat berbagai prestasi dan pencapaian santri.",
+      buttonText: "Lihat Prestasi",
+      buttonAction: () => switchSection("prestasi")
+    }
+  ];
+
+  function nextBanner() {
+    if (bannerList.length === 0) return;
+    activeBanner = (activeBanner + 1) % bannerList.length;
+  }
+
+  function prevBanner() {
+    if (bannerList.length === 0) return;
+    activeBanner =
+      (activeBanner - 1 + bannerList.length) % bannerList.length;
+  }
+
+  function goToBanner(index: number) {
+    if (index < 0 || index >= bannerList.length) return;
+    activeBanner = index;
+  }
+
+  function startBannerAutoplay() {
+    stopBannerAutoplay();
+
+    if (bannerList.length <= 1) return;
+
+    bannerInterval = setInterval(() => {
+      if (!isBannerHovered) {
+        nextBanner();
+      }
+    }, 5000);
+  }
+
+  function stopBannerAutoplay() {
+    if (bannerInterval) {
+      clearInterval(bannerInterval);
+      bannerInterval = null;
+    }
+  }
 
   let keuanganTab: "pemasukan" | "pengeluaran" = "pemasukan";
 
@@ -471,9 +554,11 @@
     ]);
 
     setupRealtimeNotifications();
+    startBannerAutoplay();
 
     return () => {
       cleanupRealtimeNotifications();
+      stopBannerAutoplay();
     };
   });
 
@@ -820,6 +905,52 @@
   }
 
   /* =========================================================
+     QR CODE UNIK PER SANTRI
+     ========================================================= */
+
+  async function generateStudentQR() {
+    if (!user?.id) return;
+
+    await tick();
+
+    const qrCanvas =
+      document.getElementById(
+        "santri-qr-main"
+      ) as HTMLCanvasElement | null;
+
+    if (!qrCanvas) return;
+
+    const qrPayload = JSON.stringify({
+      type: "SANTRI",
+      id: user.id,
+      username: user.username || "",
+      nama: user.nama || user.username || "Santri",
+      kelas: user.kelas || user.kelas_id || ""
+    });
+
+    try {
+      await QRCode.toCanvas(
+        qrCanvas,
+        qrPayload,
+        {
+          width: 250,
+          margin: 2,
+          errorCorrectionLevel: "H",
+          color: {
+            dark: "#0f172a",
+            light: "#ffffff"
+          }
+        }
+      );
+    } catch (error) {
+      console.error(
+        "Gagal membuat QR santri:",
+        error
+      );
+    }
+  }
+
+  /* =========================================================
      FORMAT RUPIAH
   ========================================================= */
 
@@ -868,7 +999,7 @@
     message = "";
 
     if (section === "barcode") {
-      await generateBarcode();
+      await generateStudentQR();
     }
 
     if (section === "pengumuman") {
@@ -1761,6 +1892,99 @@
         </div>
 
       </div>
+
+
+      <!-- =================================================
+           AUTO SLIDING PROMO BANNER
+      ================================================== -->
+
+      <section
+        class="banner-section"
+        aria-label="Informasi dan promosi"
+        on:mouseenter={() => (isBannerHovered = true)}
+        on:mouseleave={() => (isBannerHovered = false)}
+      >
+
+        <div class="banner-slider">
+
+          {#each bannerList as banner, index}
+
+            <article
+              class="banner-slide"
+              class:banner-active={index === activeBanner}
+              aria-hidden={index !== activeBanner}
+            >
+
+              <img
+                src={banner.image}
+                alt={banner.title}
+                class="banner-image"
+                loading={index === 0 ? "eager" : "lazy"}
+              />
+
+              <div class="banner-overlay"></div>
+
+              <div class="banner-content">
+                <span class="banner-label">INFORMASI</span>
+
+                <h3>{banner.title}</h3>
+
+                <p>{banner.description}</p>
+
+                {#if banner.buttonText}
+                  <button
+                    type="button"
+                    class="banner-button"
+                    on:click={() => banner.buttonAction?.()}
+                  >
+                    {banner.buttonText}
+                    <span aria-hidden="true">→</span>
+                  </button>
+                {/if}
+              </div>
+
+            </article>
+
+          {/each}
+
+          {#if bannerList.length > 1}
+
+            <button
+              type="button"
+              class="banner-arrow banner-prev"
+              on:click={prevBanner}
+              aria-label="Banner sebelumnya"
+            >
+              ‹
+            </button>
+
+            <button
+              type="button"
+              class="banner-arrow banner-next"
+              on:click={nextBanner}
+              aria-label="Banner berikutnya"
+            >
+              ›
+            </button>
+
+            <div class="banner-dots" aria-label="Navigasi banner">
+              {#each bannerList as _, index}
+                <button
+                  type="button"
+                  class="banner-dot"
+                  class:active={index === activeBanner}
+                  on:click={() => goToBanner(index)}
+                  aria-label={`Buka banner ${index + 1}`}
+                  aria-current={index === activeBanner ? "true" : undefined}
+                ></button>
+              {/each}
+            </div>
+
+          {/if}
+
+        </div>
+
+      </section>
 
     {/if}
 
@@ -2941,50 +3165,92 @@
       >
 
         <h3>
-          Kartu Barcode Santri
+          QR Code Santri
         </h3>
 
         <p
           class="sub-desc"
         >
-          Tunjukkan barcode ini
-          kepada Ustadz untuk
-          presensi.
+          QR ini dibuat khusus untuk
+          santri yang sedang login.
+          Tunjukkan kepada Ustadz saat
+          presensi atau pemeriksaan data.
         </p>
 
-
         <div
-          class="barcode-box"
+          class="qr-student-card"
         >
 
-          <h2>
+          <div class="qr-student-header">
+            <div class="qr-student-logo">
+              MS
+            </div>
 
-            {
-              user?.username ||
-              user?.nama ||
-              "Santri"
-            }
+            <div>
+              <strong>
+                MySantri
+              </strong>
 
-          </h2>
+              <span>
+                Kartu Identitas Santri
+              </span>
+            </div>
+          </div>
 
+          <div class="qr-student-profile">
+            <div class="qr-avatar">
+              {#if avatarUrl}
+                <img
+                  src={avatarUrl}
+                  alt="Foto santri"
+                />
+              {:else}
+                {
+                  (
+                    user?.username ||
+                    user?.nama ||
+                    "S"
+                  )[0].toUpperCase()
+                }
+              {/if}
+            </div>
 
-          <p
-            class="id-tag"
-          >
+            <div class="qr-student-info">
+              <strong>
+                {
+                  user?.username ||
+                  user?.nama ||
+                  "Santri"
+                }
+              </strong>
 
-            ID:
+              <span>
+                ID SANTRI-{user?.id}
+              </span>
 
-            SANTRI-
-            {user?.id}
+              <span>
+                Kelas:
+                {user?.kelas || user?.kelas_id || "-"}
+              </span>
+            </div>
+          </div>
 
+          <div class="qr-code-wrapper">
+            <canvas
+              id="santri-qr-main"
+              aria-label="QR Code unik santri"
+            ></canvas>
+          </div>
+
+          <div class="qr-unique-note">
+            <span>✓</span>
+            QR unik untuk akun santri ini
+          </div>
+
+          <p class="qr-small-text">
+            Jangan gunakan QR milik santri lain.
+            Setiap QR berisi identitas akun yang sedang login.
           </p>
-
-
-          <canvas
-            id="
-              santri-barcode-main
-            "
-          ></canvas>
 
         </div>
 
@@ -3229,12 +3495,41 @@
         </div>
 
 
+        <div class="topup-student-banner">
+          <div class="topup-student-icon">
+            {(
+              user?.username ||
+              user?.nama ||
+              "S"
+            )[0].toUpperCase()}
+          </div>
+
+          <div>
+            <span class="topup-student-label">
+              Top Up untuk santri
+            </span>
+
+            <strong>
+              {
+                user?.username ||
+                user?.nama ||
+                "Santri"
+              }
+            </strong>
+
+            <small>
+              ID: SANTRI-{user?.id}
+            </small>
+          </div>
+        </div>
+
         <p
           class="sub-desc"
         >
-          Lakukan pembayaran
-          ke rekening resmi
-          pesantren berikut:
+          Lakukan pembayaran ke rekening resmi
+          pesantren berikut. Gunakan ID santri
+          sebagai referensi agar pembayaran
+          dapat dicocokkan dengan akun yang benar.
         </p>
 
 
@@ -3252,32 +3547,22 @@
             "
           >
 
-            <div
-              class="
-                bank-info
-              "
-            >
+            <div class="bank-heading">
+              <div class="bank-logo bank-logo-bsi">
+                <span>BSI</span>
+              </div>
 
-              <span
-                class="
-                  bank-name
-                "
-              >
-                Bank BSI
-              </span>
+              <div class="bank-info">
+                <span class="bank-name">
+                  Bank BSI
+                </span>
 
 
-              <span
-                class="
-                  bank-owner
-                "
-              >
-                a.n Pesantren
-                SPP / Kantin
-              </span>
-
+                <span class="bank-owner">
+                  a.n Pesantren SPP / Kantin
+                </span>
+              </div>
             </div>
-
 
             <div
               class="
@@ -3311,32 +3596,22 @@
             "
           >
 
-            <div
-              class="
-                bank-info
-              "
-            >
+            <div class="bank-heading">
+              <div class="bank-logo bank-logo-bri">
+                <span>BRI</span>
+              </div>
 
-              <span
-                class="
-                  bank-name
-                "
-              >
-                Bank BRI
-              </span>
+              <div class="bank-info">
+                <span class="bank-name">
+                  Bank BRI
+                </span>
 
 
-              <span
-                class="
-                  bank-owner
-                "
-              >
-                a.n Pesantren
-                SPP / Kantin
-              </span>
-
+                <span class="bank-owner">
+                  a.n Pesantren SPP / Kantin
+                </span>
+              </div>
             </div>
-
 
             <div
               class="
@@ -3363,6 +3638,20 @@
 
         </div>
 
+
+        <div class="topup-reference">
+          <span>
+            Referensi transfer
+          </span>
+
+          <strong>
+            SANTRI-{user?.id}
+          </strong>
+
+          <small>
+            Cantumkan kode ini pada keterangan transfer jika diperlukan.
+          </small>
+        </div>
 
         <button
           class="
@@ -4851,57 +5140,154 @@
      BARCODE
   ====================================================== */
 
-  .barcode-box {
-    background:
-      #f8fafc;
+  /* =====================================================
+     QR CODE SANTRI
+  ====================================================== */
 
-    border:
-      2px
-      dashed
-      #cbd5e1;
-
-    border-radius:
-      16px;
-
-    padding:
-      24px;
-
-    display:
-      inline-block;
-
-    margin-top:
-      10px;
-
-    max-width:
-      100%;
-
-    overflow-x:
-      auto;
+  .qr-student-card {
+    width: min(100%, 390px);
+    margin: 18px auto 0;
+    padding: 20px;
+    box-sizing: border-box;
+    background: #ffffff;
+    border: 1px solid #dbe4f0;
+    border-radius: 22px;
+    box-shadow: 0 14px 35px rgba(15, 23, 42, 0.08);
+    text-align: left;
   }
 
-
-  .barcode-box h2 {
-    margin: 0;
-
-    font-size:
-      1.2rem;
-
-    color:
-      #1e293b;
+  .qr-student-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #eef2f7;
   }
 
+  .qr-student-logo {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d47a1;
+    color: white;
+    font-weight: 900;
+    letter-spacing: 0.5px;
+  }
 
-  .id-tag {
-    font-size:
-      0.8rem;
+  .qr-student-header strong,
+  .qr-student-header span {
+    display: block;
+  }
 
-    color:
-      #64748b;
+  .qr-student-header strong {
+    color: #0f172a;
+    font-size: 1rem;
+  }
 
-    margin:
-      4px
-      0
-      16px;
+  .qr-student-header span {
+    margin-top: 2px;
+    color: #64748b;
+    font-size: 0.72rem;
+  }
+
+  .qr-student-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 18px 0 12px;
+  }
+
+  .qr-avatar {
+    width: 58px;
+    height: 58px;
+    flex: 0 0 58px;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #e8f1ff;
+    color: #0d47a1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    font-weight: 800;
+  }
+
+  .qr-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .qr-student-info {
+    min-width: 0;
+  }
+
+  .qr-student-info strong,
+  .qr-student-info span {
+    display: block;
+  }
+
+  .qr-student-info strong {
+    color: #0f172a;
+    font-size: 1rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qr-student-info span {
+    margin-top: 3px;
+    color: #64748b;
+    font-size: 0.76rem;
+  }
+
+  .qr-code-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 12px auto;
+    padding: 14px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 18px;
+  }
+
+  .qr-code-wrapper canvas {
+    display: block;
+    width: min(250px, 100%);
+    height: auto;
+    image-rendering: pixelated;
+  }
+
+  .qr-unique-note {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    color: #047857;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+
+  .qr-unique-note span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #d1fae5;
+  }
+
+  .qr-small-text {
+    margin: 9px 0 0;
+    color: #94a3b8;
+    text-align: center;
+    font-size: 0.7rem;
+    line-height: 1.5;
   }
 
 
@@ -5218,6 +5604,121 @@
   /* =====================================================
      REKENING
   ====================================================== */
+
+  .topup-student-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    margin: 4px 0 14px;
+    border-radius: 14px;
+    background: #eff6ff;
+    border: 1px solid #dbeafe;
+  }
+
+  .topup-student-icon {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+    border-radius: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d47a1;
+    color: #fff;
+    font-weight: 800;
+  }
+
+  .topup-student-banner span,
+  .topup-student-banner strong,
+  .topup-student-banner small {
+    display: block;
+  }
+
+  .topup-student-label {
+    color: #64748b;
+    font-size: 0.68rem;
+  }
+
+  .topup-student-banner strong {
+    margin-top: 1px;
+    color: #0f172a;
+    font-size: 0.9rem;
+  }
+
+  .topup-student-banner small {
+    margin-top: 2px;
+    color: #64748b;
+    font-size: 0.68rem;
+  }
+
+  .bank-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .bank-logo {
+    width: 46px;
+    height: 38px;
+    flex: 0 0 46px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 0.82rem;
+    font-weight: 900;
+    letter-spacing: 0.5px;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.25);
+  }
+
+  .bank-logo-bsi {
+    background: #087f5b;
+  }
+
+  .bank-logo-bri {
+    background: #0b63ce;
+  }
+
+  .bank-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .topup-reference {
+    margin: 2px 0 16px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+  }
+
+  .topup-reference span,
+  .topup-reference strong,
+  .topup-reference small {
+    display: block;
+  }
+
+  .topup-reference span {
+    color: #64748b;
+    font-size: 0.7rem;
+  }
+
+  .topup-reference strong {
+    margin-top: 3px;
+    color: #0d47a1;
+    font-size: 1rem;
+    letter-spacing: 0.6px;
+  }
+
+  .topup-reference small {
+    margin-top: 3px;
+    color: #94a3b8;
+    font-size: 0.68rem;
+    line-height: 1.45;
+  }
 
   .rekening-list {
     display: flex;
@@ -5595,6 +6096,196 @@
 
 
   /* =====================================================
+     AUTO SLIDING BANNER
+  ====================================================== */
+
+  .banner-section {
+    margin-top: 20px;
+  }
+
+  .banner-slider {
+    position: relative;
+    width: 100%;
+    min-height: 260px;
+    overflow: hidden;
+    border-radius: 22px;
+    background: #0f172a;
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+    isolation: isolate;
+  }
+
+  .banner-slide {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    visibility: hidden;
+    transform: scale(1.02);
+    transition:
+      opacity 0.55s ease,
+      transform 0.7s ease,
+      visibility 0.55s ease;
+  }
+
+  .banner-slide.banner-active {
+    opacity: 1;
+    visibility: visible;
+    transform: scale(1);
+    z-index: 2;
+  }
+
+  .banner-image {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+
+  .banner-overlay {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(90deg, rgba(15, 23, 42, 0.9) 0%,
+      rgba(15, 23, 42, 0.62) 45%,
+      rgba(15, 23, 42, 0.12) 100%);
+  }
+
+  .banner-content {
+    position: relative;
+    z-index: 3;
+    max-width: 620px;
+    height: 100%;
+    min-height: 260px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 32px 86px 48px 32px;
+    color: white;
+  }
+
+  .banner-label {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(8px);
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+  }
+
+  .banner-content h3 {
+    margin: 10px 0 7px;
+    font-size: clamp(1.35rem, 3vw, 2rem);
+    line-height: 1.15;
+    color: white;
+  }
+
+  .banner-content p {
+    max-width: 520px;
+    margin: 0;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .banner-button {
+    margin-top: 18px;
+    border: 0;
+    border-radius: 12px;
+    padding: 10px 15px;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    background: white;
+    color: #0d47a1;
+    font-weight: 800;
+    font-size: 0.82rem;
+    cursor: pointer;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.14);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .banner-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+  }
+
+  .banner-arrow {
+    position: absolute;
+    top: 50%;
+    z-index: 5;
+    width: 40px;
+    height: 40px;
+    transform: translateY(-50%);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    background: rgba(15, 23, 42, 0.34);
+    color: white;
+    backdrop-filter: blur(8px);
+    font-size: 1.8rem;
+    line-height: 1;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: background 0.2s ease, transform 0.2s ease;
+  }
+
+  .banner-arrow:hover {
+    background: rgba(15, 23, 42, 0.58);
+  }
+
+  .banner-prev {
+    left: 16px;
+  }
+
+  .banner-next {
+    right: 16px;
+  }
+
+  .banner-dots {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    z-index: 6;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .banner-dot {
+    width: 8px;
+    height: 8px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.55);
+    cursor: pointer;
+    transition: width 0.25s ease, background 0.25s ease;
+  }
+
+  .banner-dot.active {
+    width: 24px;
+    border-radius: 999px;
+    background: white;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .banner-slide,
+    .banner-button,
+    .banner-arrow,
+    .banner-dot {
+      transition: none;
+    }
+  }
+
+
+  /* =====================================================
      DESKTOP
   ====================================================== */
 
@@ -5697,6 +6388,99 @@
         1.7rem;
     }
 
+    .banner-slider {
+      min-height: 230px;
+      border-radius: 18px;
+    }
+
+    .banner-content {
+      min-height: 230px;
+      padding: 24px 58px 42px 22px;
+    }
+
+    .banner-content p {
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .banner-button {
+      margin-top: 13px;
+      padding: 9px 12px;
+      font-size: 0.76rem;
+    }
+
+    .banner-arrow {
+      width: 34px;
+      height: 34px;
+      font-size: 1.5rem;
+    }
+
+    .banner-prev {
+      left: 10px;
+    }
+
+    .banner-next {
+      right: 10px;
+    }
+
+  }
+
+
+  @media (max-width: 560px) {
+    .qr-student-card {
+      padding: 15px;
+      border-radius: 18px;
+    }
+
+    .qr-code-wrapper {
+      padding: 10px;
+    }
+
+    .modal-box {
+      max-height: 92vh;
+      overflow-y: auto;
+      padding: 18px;
+      border-radius: 18px;
+    }
+
+    .bank-logo {
+      width: 42px;
+      height: 36px;
+      flex-basis: 42px;
+    }
+
+    .rekening-num {
+      font-size: 1rem;
+      overflow-wrap: anywhere;
+    }
+
+    .banner-slider {
+      min-height: 215px;
+    }
+
+    .banner-content {
+      min-height: 215px;
+      padding: 22px 48px 38px 18px;
+    }
+
+    .banner-content h3 {
+      font-size: 1.2rem;
+    }
+
+    .banner-content p {
+      font-size: 0.72rem;
+    }
+
+    .banner-label {
+      font-size: 0.6rem;
+      padding: 5px 8px;
+    }
+
+    .banner-arrow {
+      width: 30px;
+      height: 30px;
+      font-size: 1.3rem;
+    }
   }
 
 </style>
