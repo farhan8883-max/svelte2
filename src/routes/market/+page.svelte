@@ -85,6 +85,10 @@
   };
 
   onMount(async () => {
+    // Sinkronkan label "Hari Ini" dan tanggal aplikasi dengan WIB.
+    updateCurrentDate();
+    const dateTimer = window.setInterval(updateCurrentDate, 30_000);
+
     const storedUser = localStorage.getItem("user");
 
     if (!storedUser) {
@@ -111,39 +115,94 @@
       loadUsers(),
       loadHistory()
     ]);
+
+    // Bersihkan timer saat komponen dihancurkan.
+    return () => {
+      window.clearInterval(dateTimer);
+    };
   });
 
-  function todayDate() {
-    return new Date().toISOString().split("T")[0];
+  // Zona waktu aplikasi: WIB / Asia/Jakarta.
+  // Jangan gunakan toISOString().split("T")[0] untuk tanggal bisnis,
+  // karena toISOString() memakai UTC dan bisa membuat tanggal mundur 1 hari
+  // saat waktu lokal Indonesia masih malam/dini hari.
+  const APP_TIME_ZONE = "Asia/Jakarta";
+
+  let currentDate = "";
+
+  function getJakartaDate(): string {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: APP_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(new Date());
+
+    const year = parts.find((part) => part.type === "year")?.value ?? "";
+    const month = parts.find((part) => part.type === "month")?.value ?? "";
+    const day = parts.find((part) => part.type === "day")?.value ?? "";
+
+    return `${year}-${month}-${day}`;
+  }
+
+  function todayDate(): string {
+    // Selalu hitung berdasarkan waktu WIB saat fungsi dipanggil.
+    return getJakartaDate();
+  }
+
+  function updateCurrentDate() {
+    currentDate = getJakartaDate();
   }
 
   function formatRupiah(value: number) {
     return new Intl.NumberFormat("id-ID").format(Number(value) || 0);
   }
 
+  // Saldo boleh bernilai negatif. Nilai negatif berarti santri sedang memiliki utang.
+  function debtAmount(balance: number) {
+    return Math.max(0, -Number(balance || 0));
+  }
+
+  function availableBalance(balance: number) {
+    return Math.max(0, Number(balance || 0));
+  }
+
   function formatDate(date: string) {
     if (!date) return "-";
 
     const [year, month, day] = date.split("-").map(Number);
+    if (!year || !month || !day) return "-";
+
+    // Pakai tanggal ISO + offset WIB agar hasil konsisten di browser mana pun.
+    const dateValue = new Date(
+      `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00+07:00`
+    );
 
     return new Intl.DateTimeFormat("id-ID", {
+      timeZone: APP_TIME_ZONE,
       weekday: "long",
       day: "2-digit",
       month: "long",
       year: "numeric"
-    }).format(new Date(year, month - 1, day));
+    }).format(dateValue);
   }
 
   function formatDateShort(date: string) {
     if (!date) return "-";
 
     const [year, month, day] = date.split("-").map(Number);
+    if (!year || !month || !day) return "-";
+
+    const dateValue = new Date(
+      `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00+07:00`
+    );
 
     return new Intl.DateTimeFormat("id-ID", {
+      timeZone: APP_TIME_ZONE,
       day: "2-digit",
       month: "2-digit",
       year: "numeric"
-    }).format(new Date(year, month - 1, day));
+    }).format(dateValue);
   }
 
   function changeSection(section: Section) {
@@ -246,6 +305,11 @@
         return null;
       }
 
+      // Saldo bersih = seluruh pemasukan - seluruh pengeluaran.
+      // Karena tidak dibatasi minimum 0, saldo negatif otomatis menjadi utang.
+      // Saat santri mengisi saldo lagi (kind = "pemasukan"), saldo negatif
+      // akan tertutup terlebih dahulu secara alami melalui perhitungan ini.
+      // Contoh: -Rp5.000 + pemasukan Rp10.000 = saldo Rp5.000.
       const saldo = (entries || []).reduce((total, entry) => {
         const amount = Number(entry.amount) || 0;
         return entry.kind === "pemasukan"
@@ -556,10 +620,9 @@
 
       const total = cartTotal;
 
-      if (saldo < total) {
-        alert("Saldo santri tidak cukup");
-        return;
-      }
+      // Saldo tidak lagi menjadi penghalang checkout.
+      // Jika saldo kurang dari total belanja, selisihnya otomatis menjadi utang.
+      // Contoh: saldo Rp10.000 dan belanja Rp15.000 -> saldo akhir -Rp5.000.
 
       // Ambil semua stock terbaru sekaligus, bukan satu-per-satu.
       const productIds = cart.map((item) => item.product.id);
@@ -726,6 +789,7 @@
       }
 
       // Cache saldo diperbarui langsung.
+      // Nilai negatif disimpan apa adanya agar utang santri tetap tercatat.
       const newBalance = saldo - total;
       balanceCache = new Map(balanceCache).set(
         selectedUser,
@@ -1224,7 +1288,7 @@
 
                   <div>
                     <span class="history-icon">
-                      {date === todayDate() ? "📅" : "🗓️"}
+                      {date === currentDate ? "📅" : "🗓️"}
                     </span>
 
                     <div>
@@ -1675,15 +1739,29 @@
           </div>
         </div>
 
-        <div class="balance">
-          <small>Sisa Saldo</small>
+        <div class="balance" class:balance-negative={selectedUserBalance < 0}>
+          <small>
+            {#if selectedUserBalance < 0}
+              Utang Santri
+            {:else}
+              Sisa Saldo
+            {/if}
+          </small>
           <strong>
             {#if balanceLoading}
               Memuat saldo...
+            {:else if selectedUserBalance < 0}
+              -Rp {formatRupiah(debtAmount(selectedUserBalance))}
             {:else}
               Rp {formatRupiah(selectedUserBalance)}
             {/if}
           </strong>
+
+          {#if !balanceLoading && selectedUserBalance < 0}
+            <span class="debt-note">
+              Santri masih memiliki utang Rp {formatRupiah(debtAmount(selectedUserBalance))}.
+            </span>
+          {/if}
         </div>
 
         <div class="checkout-total">
@@ -1694,8 +1772,14 @@
         </div>
 
         {#if selectedUser && selectedUserBalance < cartTotal}
-          <div class="warning">
-            ⚠️ Saldo santri tidak cukup.
+          <div class="warning debt-warning">
+            ⚠️ Saldo tidak mencukupi. Pembayaran tetap dapat diproses dan
+            <strong>Rp {formatRupiah(cartTotal - selectedUserBalance)}</strong>
+            akan menjadi total utang setelah transaksi.
+          </div>
+        {:else if selectedUser && selectedUserBalance >= cartTotal}
+          <div class="success-note">
+            ✓ Saldo mencukupi untuk pembayaran ini.
           </div>
         {/if}
 
@@ -1704,8 +1788,7 @@
           disabled={
             loading ||
             balanceLoading ||
-            !selectedUser ||
-            selectedUserBalance < cartTotal
+            !selectedUser
           }
           on:click={checkout}
         >
@@ -2643,7 +2726,7 @@
     padding: 20px;
     display: grid;
     place-items: center;
-    background: rgba(15,23,42,.62);
+    background: rgba(0, 64, 255, 0.62);
   }
 
   .modal-card,
@@ -2853,6 +2936,35 @@
   .user-option:disabled {
     cursor: wait;
     opacity: .65;
+  }
+
+  .balance-negative strong {
+    color: #b12704;
+  }
+
+  .debt-note {
+    display: block;
+    margin-top: 5px;
+    color: #b12704;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .debt-warning {
+    border-color: #e0a800;
+    background: #fff8e1;
+    color: #7a5200;
+  }
+
+  .success-note {
+    margin: 10px 0;
+    padding: 11px 13px;
+    border: 1px solid #b7dfb9;
+    border-radius: 4px;
+    background: #f1fbf2;
+    color: #216e2a;
+    font-size: 13px;
+    line-height: 1.45;
   }
 
   .warning {
