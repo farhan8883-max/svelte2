@@ -3,7 +3,7 @@
   import { supabase } from "$lib/supabaseClient";
   import { onMount, onDestroy } from "svelte";
   import QRCode from "qrcode";
-  import { Html5Qrcode } from "html5-qrcode";
+  import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
   import { goto } from "$app/navigation";
 
   /* =========================
@@ -76,6 +76,13 @@
     status: "hadir" | "izin" | "sakit" | "alpha";
   }
 
+  type AttendanceStatus = Attendance["status"] | "";
+
+  // Status absensi sementara. Tidak dikirim ke Supabase sampai tombol
+  // "Simpan Semua Absensi" ditekan.
+  let attendanceDrafts: Record<number, AttendanceStatus> = {};
+  let attendanceSaving = false;
+
   interface Schedule {
     id?: number;
     day: string;
@@ -98,6 +105,7 @@
     | "spp"
     | "users"
     | "attendance"
+    | "attendanceScan"
     | "schedule"
     | "grades"
     | "barcode"
@@ -277,9 +285,11 @@
   let qrScanner: Html5Qrcode | null = null;
   let qrScannerRunning = false;
   let qrScanBusy = false;
+  let qrScannerStarting = false;
   let lastScannedPayload = "";
   let lastScannedStudent: User | null = null;
   let qrScanMessage = "";
+  let cameraError = "";
 
   async function generateQRCode(userId: number) {
     try {
@@ -329,42 +339,12 @@
       return false;
     }
 
-    const existing = getAttendance(userId);
-
-    if (existing?.id) {
-      if (existing.status === "hadir") {
-        showToast(`${santri.full_name || santri.username} sudah absen hadir hari ini.`, true);
-        return false;
-      }
-
-      const { error } = await supabase
-        .from("attendance")
-        .update({ status: "hadir" })
-        .eq("id", existing.id);
-
-      if (error) {
-        showToast("Gagal memperbarui absensi: " + error.message, true);
-        return false;
-      }
-    } else {
-      const { error } = await supabase
-        .from("attendance")
-        .insert([{
-          user_id: userId,
-          date: attendanceDate,
-          status: "hadir"
-        }]);
-
-      if (error) {
-        showToast("Gagal menyimpan absensi QR: " + error.message, true);
-        return false;
-      }
-    }
+    const saved = await saveAttendanceForStudent(userId, "hadir", false);
+    if (!saved) return false;
 
     lastScannedStudent = santri;
-    qrScanMessage = `✓ ${santri.full_name || santri.username} berhasil absen hadir.`;
-    showToast(qrScanMessage);
-    await loadAttendance();
+    qrScanMessage = `✓ ${santri.full_name || santri.username} berhasil disimpan sebagai Hadir.`;
+    showToast(`${santri.full_name || santri.username} berhasil disimpan sebagai Hadir.`);
     return true;
   }
 
@@ -399,65 +379,211 @@
     }
   }
 
+  function getCameraErrorMessage(error: unknown) {
+    const name = error instanceof DOMException ? error.name : "";
+    const message = error instanceof Error ? error.message : String(error || "");
+
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      return "Izin kamera ditolak. Izinkan kamera untuk situs ini, lalu tekan Mulai Scan lagi.";
+    }
+
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      return "Kamera tidak ditemukan pada perangkat ini.";
+    }
+
+    if (name === "NotReadableError" || name === "TrackStartError") {
+      return "Kamera sedang digunakan aplikasi/tab lain. Tutup penggunaan kamera lain lalu coba lagi.";
+    }
+
+    if (name === "SecurityError") {
+      return "Browser memblokir akses kamera karena alasan keamanan.";
+    }
+
+    if (name === "OverconstrainedError") {
+      return "Kamera yang dipilih tidak tersedia. Sistem akan mencoba kamera lain.";
+    }
+
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      return "Akses kamera membutuhkan HTTPS (atau localhost saat development).";
+    }
+
+    return message
+      ? `Kamera tidak dapat dibuka: ${message}`
+      : "Kamera tidak dapat dibuka. Periksa izin kamera dan HTTPS.";
+  }
+
+  async function releaseQRScanner() {
+    const scanner = qrScanner;
+    qrScanner = null;
+
+    if (!scanner) {
+      qrScannerRunning = false;
+      return;
+    }
+
+    try {
+      if (qrScannerRunning) {
+        await scanner.stop();
+      }
+    } catch (error) {
+      console.warn("Gagal menghentikan kamera:", error);
+    }
+
+    try {
+      await scanner.clear();
+    } catch (error) {
+      console.warn("Gagal membersihkan scanner:", error);
+    }
+
+    qrScannerRunning = false;
+  }
+
   async function startQRScanner() {
-    if (qrScannerRunning) return;
+    if (qrScannerRunning || qrScannerStarting) return;
 
     if (!canManageAttendance) {
       showToast("Hanya admin atau ustad yang dapat menggunakan scanner absensi.", true);
       return;
     }
 
+    if (typeof window === "undefined") return;
+
+    const reader = document.getElementById("qr-reader");
+    if (!reader) {
+      showToast("Area kamera belum siap. Buka halaman Scan Absensi lalu coba lagi.", true);
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      cameraError = "Kamera browser membutuhkan HTTPS. Jika development, gunakan localhost.";
+      qrScanMessage = cameraError;
+      showToast(cameraError, true);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      cameraError = "Browser ini tidak mendukung akses kamera.";
+      qrScanMessage = cameraError;
+      showToast(cameraError, true);
+      return;
+    }
+
+    qrScannerStarting = true;
+    cameraError = "";
     qrScanMessage = "Meminta izin kamera...";
+    lastScannedPayload = "";
+    qrScanBusy = false;
+
+    // Pastikan instance lama benar-benar dilepas sebelum membuat instance baru.
+    await releaseQRScanner();
+
+    // Bersihkan isi target agar html5-qrcode tidak bertabrakan dengan instance sebelumnya.
+    reader.innerHTML = "";
 
     try {
-      qrScanner = new Html5Qrcode("qr-reader");
+      // getCameras() sekaligus memicu permission request pada browser yang mendukungnya.
+      const cameras = await Html5Qrcode.getCameras();
 
-      await qrScanner.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 },
-          aspectRatio: 1
-        },
-        async (decodedText) => {
-          await handleQRCode(decodedText);
-        },
-        () => {
-          // Frame tanpa QR diabaikan.
+      if (!cameras?.length) {
+        throw new Error("Tidak ada kamera yang tersedia.");
+      }
+
+      // Utamakan kamera belakang pada HP berdasarkan label.
+      const backCamera =
+        cameras.find(camera =>
+          /back|rear|environment|belakang|belakang/i.test(camera.label)
+        ) || cameras[cameras.length > 1 ? 1 : 0] || cameras[0];
+
+      const scanner = new Html5Qrcode("qr-reader");
+      qrScanner = scanner;
+
+      const config = {
+        fps: 10,
+        qrbox: { width: 250, height: 250 },
+        aspectRatio: 1,
+        disableFlip: false,
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.CODE_93,
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.EAN_8
+        ]
+      };
+
+      try {
+        // Memulai berdasarkan deviceId lebih stabil daripada hanya mengandalkan facingMode.
+        await scanner.start(
+          backCamera.id,
+          config,
+          async (decodedText) => {
+            await handleQRCode(decodedText);
+          },
+          () => {
+            // Tidak ada QR pada frame ini: abaikan.
+          }
+        );
+      } catch (firstError) {
+        // Fallback untuk perangkat/browser yang menolak deviceId tertentu.
+        try {
+          await scanner.clear();
+
+          const fallbackScanner = new Html5Qrcode("qr-reader");
+          qrScanner = fallbackScanner;
+
+          await fallbackScanner.start(
+            { facingMode: { ideal: "environment" } },
+            config,
+            async (decodedText) => {
+              await handleQRCode(decodedText);
+            },
+            () => {}
+          );
+        } catch (fallbackError) {
+          try {
+            await scanner.clear();
+          } catch {}
+
+          throw fallbackError ?? firstError;
         }
-      );
+      }
 
       qrScannerRunning = true;
-      qrScanMessage = "Kamera aktif. Arahkan ke QR Code santri.";
+      qrScanMessage = "Kamera aktif. Arahkan kamera ke QR Code/barcode santri.";
     } catch (error) {
       console.error("Gagal membuka kamera:", error);
-      qrScanner = null;
-      qrScannerRunning = false;
-      qrScanMessage = "Kamera tidak dapat dibuka. Pastikan izin kamera diberikan dan gunakan HTTPS.";
-      showToast(qrScanMessage, true);
+
+      await releaseQRScanner();
+      reader.innerHTML = "";
+
+      cameraError = getCameraErrorMessage(error);
+      qrScanMessage = cameraError;
+      showToast(cameraError, true);
+    } finally {
+      qrScannerStarting = false;
     }
   }
 
   async function stopQRScanner() {
-    if (!qrScanner) {
-      qrScannerRunning = false;
-      return;
-    }
+    cameraError = "";
+    qrScanMessage = "Kamera dihentikan.";
+    qrScanBusy = false;
+    lastScannedPayload = "";
 
-    try {
-      if (qrScannerRunning) await qrScanner.stop();
-      await qrScanner.clear();
-    } catch (error) {
-      console.error("Gagal menghentikan scanner:", error);
-    } finally {
-      qrScanner = null;
-      qrScannerRunning = false;
-    }
+    await releaseQRScanner();
+
+    const reader = document.getElementById("qr-reader");
+    if (reader) reader.innerHTML = "";
   }
 
   async function restartQRScannerForDate() {
     lastScannedStudent = null;
-    qrScanMessage = "";
+    lastScannedPayload = "";
+    qrScanMessage = qrScannerRunning
+      ? "Tanggal diperbarui. Kamera tetap aktif."
+      : "";
+    cameraError = "";
     await loadAttendance();
   }
 
@@ -1597,41 +1723,31 @@
   ========================= */
 
   async function loadAttendance() {
-
     const {
       data,
       error
     } = await supabase
       .from("attendance")
       .select("*")
-      .eq(
-        "date",
-        attendanceDate
-      )
-      .order(
-        "id",
-        {
-          ascending:
-            false
-        }
-      );
+      .eq("date", attendanceDate)
+      .order("id", { ascending: false });
 
     if (error) {
-
-      showToast(
-        "Gagal memuat absensi: " +
-          error.message,
-        true
-      );
-
+      showToast("Gagal memuat absensi: " + error.message, true);
       attendanceData = [];
-
+      attendanceDrafts = {};
       return;
     }
 
-    attendanceData =
-      (data || []) as
-      Attendance[];
+    attendanceData = (data || []) as Attendance[];
+
+    // Isi draft dari data database. Santri yang belum punya data
+    // sengaja dibiarkan kosong agar wajib diinput sebelum disimpan.
+    const drafts: Record<number, AttendanceStatus> = {};
+    attendanceData.forEach(item => {
+      drafts[Number(item.user_id)] = item.status;
+    });
+    attendanceDrafts = drafts;
   }
 
   async function changeAttendanceDate() {
@@ -1640,122 +1756,153 @@
     await loadAttendance();
   }
 
-  function getAttendance(
-    userId: number
-  ) {
-
+  function getAttendance(userId: number) {
     return attendanceData.find(
-      item =>
-        Number(
-          item.user_id
-        ) === userId
+      item => Number(item.user_id) === userId
     );
   }
 
+  function getDraftAttendance(userId: number): AttendanceStatus {
+    return attendanceDrafts[userId] ?? "";
+  }
+
+  function setDraftAttendance(userId: number, status: AttendanceStatus) {
+    attendanceDrafts = {
+      ...attendanceDrafts,
+      [userId]: status
+    };
+  }
+
+  $: attendanceDraftGroup = attendanceStudents.map(santri => ({
+    student: santri,
+    status: getDraftAttendance(santri.id)
+  }));
+
+  $: attendanceDraftSummary = {
+    hadir: attendanceDraftGroup.filter(item => item.status === "hadir").length,
+    izin: attendanceDraftGroup.filter(item => item.status === "izin").length,
+    sakit: attendanceDraftGroup.filter(item => item.status === "sakit").length,
+    alpha: attendanceDraftGroup.filter(item => item.status === "alpha").length,
+    belum: attendanceDraftGroup.filter(item => !item.status).length
+  };
+
+  $: attendanceUnsavedCount = attendanceDraftGroup.filter(item => {
+    const saved = getAttendance(item.student.id)?.status ?? "";
+    return item.status !== saved;
+  }).length;
+
   /* =========================
-     SAVE ATTENDANCE
+     SAVE SINGLE ATTENDANCE
   ========================= */
 
-  async function saveAttendance() {
-
-    if (!canManageAttendance) {
-
-      showToast(
-        "Hanya admin atau ustad yang dapat mengisi absensi.",
-        true
-      );
-
-      return;
+  async function saveAttendanceForStudent(
+    userId: number,
+    status: AttendanceStatus,
+    showMessage = true
+  ) {
+    if (!canManageAttendance || !status) {
+      if (showMessage) showToast("Pilih status absensi terlebih dahulu.", true);
+      return false;
     }
 
-    if (
-      !selectedAttendanceUser
-    ) {
+    const existing = getAttendance(userId);
 
-      showToast(
-        "Pilih santri terlebih dahulu!",
-        true
-      );
+    const result = existing?.id
+      ? await supabase.from("attendance").update({ status }).eq("id", existing.id)
+      : await supabase.from("attendance").insert([{
+          user_id: userId,
+          date: attendanceDate,
+          status
+        }]);
 
-      return;
+    if (result.error) {
+      if (showMessage) showToast("Gagal menyimpan absensi: " + result.error.message, true);
+      return false;
     }
 
-    const userId =
-      Number(
-        selectedAttendanceUser
-      );
-
-    const existing =
-      getAttendance(
-        userId
-      );
-
-    if (
-      existing?.id
-    ) {
-
-      const {
-        error
-      } = await supabase
-        .from("attendance")
-        .update({
-          status:
-            attendanceStatus
-        })
-        .eq(
-          "id",
-          existing.id
-        );
-
-      if (error) {
-
-        showToast(
-          "Gagal mengubah absensi: " +
-            error.message,
-          true
-        );
-
-        return;
-      }
-
-    } else {
-
-      const {
-        error
-      } = await supabase
-        .from("attendance")
-        .insert([
-          {
-            user_id:
-              userId,
-
-            date:
-              attendanceDate,
-
-            status:
-              attendanceStatus
-          }
-        ]);
-
-      if (error) {
-
-        showToast(
-          "Gagal menyimpan absensi: " +
-            error.message,
-          true
-        );
-
-        return;
-      }
-    }
-
-    showToast(
-      "✓ Absensi berhasil disimpan!"
-    );
-
-    selectedAttendanceUser = "";
+    attendanceDrafts = {
+      ...attendanceDrafts,
+      [userId]: status
+    };
 
     await loadAttendance();
+
+    if (showMessage) {
+      const student = santriUsers.find(user => user.id === userId);
+      showToast(`✓ ${student?.full_name || student?.username || "Absensi"} berhasil disimpan.`);
+    }
+
+    return true;
+  }
+
+  /* =========================
+     SAVE ALL ATTENDANCE
+  ========================= */
+
+  async function saveAllAttendance() {
+    if (!canManageAttendance) {
+      showToast("Hanya admin atau ustad yang dapat mengisi absensi.", true);
+      return;
+    }
+
+    if (!attendanceStudents.length) {
+      showToast("Tidak ada santri pada kelompok yang dipilih.", true);
+      return;
+    }
+
+    const pendingStudents = attendanceStudents.filter(santri => {
+      const draft = getDraftAttendance(santri.id);
+      const saved = getAttendance(santri.id)?.status ?? "";
+      return !!draft && draft !== saved;
+    });
+
+    if (!pendingStudents.length) {
+      showToast("Tidak ada absensi baru yang perlu disimpan.", true);
+      return;
+    }
+
+    attendanceSaving = true;
+
+    try {
+      const operations = pendingStudents.map(async santri => {
+        const status = getDraftAttendance(santri.id) as Attendance["status"];
+        const existing = getAttendance(santri.id);
+
+        if (existing?.id) {
+          return supabase
+            .from("attendance")
+            .update({ status })
+            .eq("id", existing.id);
+        }
+
+        return supabase
+          .from("attendance")
+          .insert([{
+            user_id: santri.id,
+            date: attendanceDate,
+            status
+          }]);
+      });
+
+      const results = await Promise.all(operations);
+      const failed = results.find(result => result.error);
+
+      if (failed?.error) {
+        showToast("Gagal menyimpan semua absensi: " + failed.error.message, true);
+        return;
+      }
+
+      showToast(`✓ ${pendingStudents.length} absensi berhasil disimpan.`);
+      await loadAttendance();
+    } finally {
+      attendanceSaving = false;
+    }
+  }
+
+  // Fungsi lama dipertahankan sebagai alias agar event/fitur lain
+  // yang masih memanggil saveAttendance tidak error.
+  async function saveAttendance() {
+    await saveAllAttendance();
   }
 
   /* =========================
@@ -2418,15 +2565,17 @@
   async function changeView(
     view: ActiveView
   ) {
-    if (activeView === "attendance" && view !== "attendance") {
+    // Kamera hanya aktif pada halaman Scan Absensi.
+    if (activeView === "attendanceScan" && view !== "attendanceScan") {
       await stopQRScanner();
     }
 
     activeView = view;
     sidebarOpen = false;
 
-    if (view === "attendance") {
+    if (view === "attendance" || view === "attendanceScan") {
       lastScannedStudent = null;
+      lastScannedPayload = "";
       qrScanMessage = "";
       await loadAttendance();
     }
@@ -2504,8 +2653,19 @@
           changeView("attendance")}
       >
         📅
-        Absensi
+        Absensi Manual
       </button>
+
+      {#if canManageAttendance}
+        <button
+          class:active={activeView === "attendanceScan"}
+          class="nav-item scan-nav-item"
+          on:click={() => changeView("attendanceScan")}
+        >
+          📷
+          Scan Absensi
+        </button>
+      {/if}
 
 
       <button
@@ -2746,8 +2906,15 @@
             <div class="services-grid">
               <button class="service-item" on:click={() => changeView("attendance")}>
                 <div class="s-icon red">📅</div>
-                <span>Absensi</span>
+                <span>Absensi Manual</span>
               </button>
+
+              {#if canManageAttendance}
+                <button class="service-item" on:click={() => changeView("attendanceScan")}>
+                  <div class="s-icon blue">📷</div>
+                  <span>Scan Absensi</span>
+                </button>
+              {/if}
 
               <button class="service-item" on:click={() => changeView("schedule")}>
                 <div class="s-icon purple">🗓️</div>
@@ -2838,51 +3005,7 @@
           </div>
 
 
-          {#if canManageAttendance}
-            <div class="qr-attendance-box">
-              <div class="qr-attendance-header">
-                <div>
-                  <h3>📷 Scan QR Santri</h3>
-                  <p>Arahkan kamera ke QR Code santri. Setelah terbaca, absensi otomatis tersimpan sebagai Hadir.</p>
-                </div>
-                {#if qrScannerRunning}
-                  <button class="btn-danger" type="button" on:click={stopQRScanner}>
-                    ⏹ Stop Kamera
-                  </button>
-                {:else}
-                  <button class="btn-primary" type="button" on:click={startQRScanner}>
-                    📷 Mulai Scan
-                  </button>
-                {/if}
-              </div>
 
-              <div id="qr-reader" class:qr-reader-active={qrScannerRunning}></div>
-
-              {#if !qrScannerRunning}
-                <div class="scanner-placeholder">
-                  <div class="scanner-placeholder-icon">📱</div>
-                  <strong>Kamera belum aktif</strong>
-                  <span>Tekan "Mulai Scan" untuk membaca QR santri.</span>
-                </div>
-              {/if}
-
-              {#if qrScanMessage}
-                <div class:success={!!lastScannedStudent} class="qr-scan-message">
-                  {qrScanMessage}
-                </div>
-              {/if}
-
-              {#if lastScannedStudent}
-                <div class="qr-student-result">
-                  <div class="user-avatar">{(lastScannedStudent.full_name || lastScannedStudent.username).charAt(0).toUpperCase()}</div>
-                  <div>
-                    <strong>{lastScannedStudent.full_name || lastScannedStudent.username}</strong>
-                    <span>ID-{lastScannedStudent.id} • Hadir • {attendanceDate}</span>
-                  </div>
-                </div>
-              {/if}
-            </div>
-          {/if}
 
 
           <div class="attendance-group-tabs">
@@ -2948,146 +3071,88 @@
 
           {#if canManageAttendance}
 
-            <div
-              class="attendance-form"
-            >
+            <div class="attendance-input-header">
+              <div>
+                <strong>Input Absensi Per Santri</strong>
+                <span>Pilih status setiap santri terlebih dahulu. Data belum disimpan sampai tombol simpan ditekan.</span>
+              </div>
 
-              <select
-                bind:value={
-                  selectedAttendanceUser
-                }
-              >
+              <div class="attendance-draft-info">
+                <strong>{attendanceDraftSummary.belum}</strong>
+                <span>belum diisi</span>
+              </div>
+            </div>
 
-                <option value="">
-                  -- Pilih Santri --
-                </option>
+            <div class="attendance-bulk-actions">
+              {#if attendanceUnsavedCount > 0}
+                <span class="attendance-unsaved">
+                  {attendanceUnsavedCount} perubahan belum disimpan
+                </span>
+              {:else}
+                <span class="attendance-saved">
+                  ✓ Tidak ada perubahan yang belum disimpan
+                </span>
+              {/if}
+            </div>
 
-
+            <div class="attendance-form attendance-form-single">
+              <select bind:value={selectedAttendanceUser}>
+                <option value="">-- Pilih Santri untuk input cepat --</option>
                 {#each attendanceStudents as santri}
-
-                  <option
-                    value={santri.id}
-                  >
-                    {santri.username}
+                  <option value={santri.id}>
+                    {santri.full_name || santri.username}
                   </option>
-
                 {/each}
-
               </select>
-
 
               <select
-                bind:value={
-                  attendanceStatus
-                }
+                value={selectedAttendanceUser ? getDraftAttendance(Number(selectedAttendanceUser)) : ""}
+                on:change={(event) => {
+                  if (selectedAttendanceUser) {
+                    setDraftAttendance(
+                      Number(selectedAttendanceUser),
+                      (event.currentTarget as HTMLSelectElement).value as AttendanceStatus
+                    );
+                  }
+                }}
+                disabled={!selectedAttendanceUser}
               >
-
-                <option value="hadir">
-                  Hadir
-                </option>
-
-                <option value="izin">
-                  Izin
-                </option>
-
-                <option value="sakit">
-                  Sakit
-                </option>
-
-                <option value="alpha">
-                  Alpha
-                </option>
-
+                <option value="">-- Status --</option>
+                <option value="hadir">Hadir</option>
+                <option value="izin">Izin</option>
+                <option value="sakit">Sakit</option>
+                <option value="alpha">Alpha</option>
               </select>
 
-
-              <button
-                class="btn-primary"
-                on:click={
-                  saveAttendance
-                }
-              >
-                ✓ Simpan Absensi
-              </button>
-
+              <span class="attendance-quick-note">
+                Input cepat ini mengubah draft saja.
+              </span>
             </div>
 
           {/if}
 
-
-          <div
-            class="attendance-summary"
-          >
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  attendanceGroupSummary.hadir
-                }
-              </strong>
-
-              <span>
-                Hadir
-              </span>
-
+          <div class="attendance-summary">
+            <div class="attendance-summary-item">
+              <strong>{attendanceDraftSummary.hadir}</strong>
+              <span>Hadir</span>
             </div>
-
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  attendanceGroupSummary.izin
-                }
-              </strong>
-
-              <span>
-                Izin
-              </span>
-
+            <div class="attendance-summary-item">
+              <strong>{attendanceDraftSummary.izin}</strong>
+              <span>Izin</span>
             </div>
-
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  attendanceGroupSummary.sakit
-                }
-              </strong>
-
-              <span>
-                Sakit
-              </span>
-
+            <div class="attendance-summary-item">
+              <strong>{attendanceDraftSummary.sakit}</strong>
+              <span>Sakit</span>
             </div>
-
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  attendanceGroupSummary.alpha
-                }
-              </strong>
-
-              <span>
-                Alpha
-              </span>
-
+            <div class="attendance-summary-item">
+              <strong>{attendanceDraftSummary.alpha}</strong>
+              <span>Alpha</span>
             </div>
-
+            <div class="attendance-summary-item">
+              <strong>{attendanceDraftSummary.belum}</strong>
+              <span>Belum Diisi</span>
+            </div>
           </div>
-
 
           <div
             class="table-responsive"
@@ -3106,7 +3171,11 @@
                   </th>
 
                   <th>
-                    Status
+                    Input Status
+                  </th>
+
+                  <th>
+                    Status Tersimpan
                   </th>
 
                   <th>
@@ -3159,38 +3228,42 @@
 
 
                     <td>
-
-                      {#if attendance}
-
-                        <span
-                          class="attendance-badge {attendance.status}"
-                        >
-
-                          {
-                            attendanceLabel(
-                              attendance.status
-                            )
+                      <select
+                        class="attendance-row-select"
+                        value={getDraftAttendance(santri.id)}
+                        on:change={async (event) => {
+                          const status = (event.currentTarget as HTMLSelectElement).value as AttendanceStatus;
+                          setDraftAttendance(santri.id, status);
+                          if (status) {
+                            await saveAttendanceForStudent(santri.id, status);
                           }
+                        }}
+                        disabled={attendanceSaving}
+                      >
+                        <option value="">-- Pilih --</option>
+                        <option value="hadir">Hadir</option>
+                        <option value="izin">Izin</option>
+                        <option value="sakit">Sakit</option>
+                        <option value="alpha">Alpha</option>
+                      </select>
+                    </td>
 
+                    <td>
+                      {#if attendance}
+                        <span class="attendance-badge {attendance.status}">
+                          {attendanceLabel(attendance.status)}
                         </span>
-
                       {:else}
-
-                        <span
-                          class="attendance-badge belum"
-                        >
-                          Belum diisi
+                        <span class="attendance-badge belum">
+                          Belum disimpan
                         </span>
-
                       {/if}
-
                     </td>
 
 
                     <td>
                       {attendanceDate}
                     </td>
-
                   </tr>
 
                 {/each}
@@ -3200,6 +3273,134 @@
             </table>
 
           </div>
+
+        </div>
+
+
+      <!-- =========================
+           SCAN ABSEN
+      ========================= -->
+
+      {:else if activeView === "attendanceScan"}
+
+        <div class="bca-card sub-view-container scan-attendance-page">
+
+          <div class="sub-header-row">
+            <div>
+              <span class="section-kicker">ABSENSI DIGITAL</span>
+              <h3>📷 Scan QR / Barcode Absensi</h3>
+              <p class="sub-description">
+                Halaman ini khusus untuk scan QR/barcode santri. Form absensi manual tetap berada di halaman Absensi Manual.
+              </p>
+            </div>
+
+            <button class="btn-back" type="button" on:click={() => changeView("attendance")}>
+              ← Absensi Manual
+            </button>
+          </div>
+
+          {#if !canManageAttendance}
+            <div class="qr-attendance-box scanner-access-denied">
+              <div class="scanner-placeholder-icon">🔒</div>
+              <strong>Akses scan absensi tidak tersedia</strong>
+              <span>Hanya admin atau ustad yang dapat menggunakan scanner absensi.</span>
+            </div>
+          {:else}
+            <div class="scan-attendance-grid">
+              <div class="scan-date-card">
+                <label for="scan-attendance-date">Tanggal Absensi</label>
+                <input
+                  id="scan-attendance-date"
+                  type="date"
+                  bind:value={attendanceDate}
+                  on:change={changeAttendanceDate}
+                />
+                <small>Hasil scan akan dicatat sebagai <strong>Hadir</strong> pada tanggal ini.</small>
+              </div>
+
+              <div class="scan-status-card">
+                <span>Status Scanner</span>
+                {#if qrScannerRunning}
+                  <strong class="scan-status-live">● Kamera aktif</strong>
+                {:else}
+                  <strong>○ Kamera belum aktif</strong>
+                {/if}
+              </div>
+            </div>
+
+            <div class="qr-attendance-box scanner-box">
+              <div class="qr-attendance-header">
+                <div>
+                  <span class="section-kicker">SCANNER</span>
+                  <h3>📱 Arahkan kamera ke QR / Barcode Santri</h3>
+                  <p>Setelah kode terbaca, sistem otomatis menyimpan status Hadir.</p>
+                </div>
+
+                {#if qrScannerRunning}
+                  <button class="btn-danger" type="button" on:click={stopQRScanner}>
+                    ⏹ Stop Kamera
+                  </button>
+                {:else}
+                  <button
+                    class="btn-primary"
+                    type="button"
+                    on:click={startQRScanner}
+                    disabled={qrScannerStarting}
+                  >
+                    {qrScannerStarting ? "⏳ Membuka Kamera..." : "📷 Mulai Scan"}
+                  </button>
+                {/if}
+              </div>
+
+              <div id="qr-reader" class:qr-reader-active={qrScannerRunning}></div>
+
+              {#if !qrScannerRunning}
+                <div class="scanner-placeholder">
+                  <div class="scanner-placeholder-icon">📱</div>
+                  <strong>Kamera belum aktif</strong>
+                  <span>Tekan “Mulai Scan” lalu arahkan kamera ke kode santri.</span>
+                </div>
+              {/if}
+
+              {#if qrScanMessage}
+                <div class:success={!!lastScannedStudent} class:error={!!cameraError} class="qr-scan-message">
+                  {qrScanMessage}
+                </div>
+              {/if}
+
+              {#if cameraError}
+                <div class="camera-help-box">
+                  <strong>Jika kamera belum bisa dibuka:</strong>
+                  <span>Pastikan izin kamera untuk situs ini diaktifkan dan halaman dibuka melalui HTTPS atau localhost.</span>
+                </div>
+              {/if}
+
+              {#if lastScannedStudent}
+                <div class="qr-student-result">
+                  <div class="user-avatar">{(lastScannedStudent.full_name || lastScannedStudent.username).charAt(0).toUpperCase()}</div>
+                  <div>
+                    <strong>{lastScannedStudent.full_name || lastScannedStudent.username}</strong>
+                    <span>ID-{lastScannedStudent.id} • Hadir • {attendanceDate}</span>
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            <div class="scan-help-grid">
+              <div>
+                <strong>1. Pilih tanggal</strong>
+                <span>Tanggal menjadi tanggal absensi hasil scan.</span>
+              </div>
+              <div>
+                <strong>2. Mulai kamera</strong>
+                <span>Izinkan akses kamera pada browser.</span>
+              </div>
+              <div>
+                <strong>3. Scan kode</strong>
+                <span>QR/barcode santri langsung dicatat sebagai Hadir.</span>
+              </div>
+            </div>
+          {/if}
 
         </div>
 
@@ -6308,6 +6509,93 @@
   }
 
 
+  .attendance-input-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    border: 1px solid #dbe3ef;
+    border-radius: 14px;
+    background: #f8fafc;
+  }
+
+  .attendance-input-header > div:first-child {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .attendance-input-header span {
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .attendance-draft-info {
+    min-width: 90px;
+    text-align: center;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+  }
+
+  .attendance-draft-info strong {
+    display: block;
+    font-size: 18px;
+  }
+
+  .attendance-bulk-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 10px 0 14px;
+  }
+
+  .attendance-save-all:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .attendance-unsaved {
+    color: #b45309 !important;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .attendance-saved {
+    color: #15803d !important;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .attendance-form-single {
+    margin-bottom: 18px;
+  }
+
+  .attendance-quick-note {
+    color: #64748b;
+    font-size: 12px;
+    align-self: center;
+  }
+
+  .attendance-row-select {
+    width: 100%;
+    min-width: 130px;
+    padding: 8px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #ffffff;
+    font-size: 12px;
+  }
+
+  .attendance-row-select:focus {
+    outline: 2px solid rgba(37, 99, 235, 0.15);
+    border-color: #2563eb;
+  }
+
   .attendance-summary {
 
     display:
@@ -6835,6 +7123,108 @@
     line-height: 1.5;
   }
 
+  .scan-nav-item {
+    border: 1px solid rgba(37, 99, 235, 0.14);
+  }
+
+  .scan-attendance-page {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .section-kicker {
+    display: inline-block;
+    margin-bottom: 6px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+
+  .scan-attendance-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(220px, 0.8fr);
+    gap: 14px;
+  }
+
+  .scan-date-card,
+  .scan-status-card {
+    padding: 18px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 16px;
+    background: #fff;
+  }
+
+  .scan-date-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .scan-date-card input {
+    width: 100%;
+  }
+
+  .scan-date-card small,
+  .scan-status-card span,
+  .scan-help-grid span {
+    color: #64748b;
+  }
+
+  .scan-status-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 7px;
+  }
+
+  .scan-status-live {
+    color: #16a34a;
+  }
+
+  .scanner-box {
+    overflow: hidden;
+  }
+
+  .scanner-access-denied {
+    min-height: 240px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    text-align: center;
+  }
+
+  .scan-help-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .scan-help-grid > div {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 15px;
+    border-radius: 14px;
+    background: rgba(15, 23, 42, 0.035);
+  }
+
+  @media (max-width: 760px) {
+    .scan-attendance-grid,
+    .scan-help-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .qr-attendance-header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+  }
+
   #qr-reader {
     width: 100%;
     max-width: 520px;
@@ -6867,6 +7257,29 @@
 
   .scanner-placeholder-icon {
     font-size: 48px;
+  }
+
+  .qr-scan-message.error {
+    background: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+  }
+
+  .camera-help-box {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #eff6ff;
+    color: #1e40af;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+  }
+
+  button:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
   }
 
   .qr-scan-message {
@@ -7864,7 +8277,57 @@
     color: #64748b;
     font-size: 0.82rem;
   }
+
+
+  .attendance-save-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 16px;
+    padding: 16px;
+    border: 1px solid #dbe3ef;
+    border-radius: 14px;
+    background: #f8fafc;
+  }
+
+  .attendance-save-bottom > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .attendance-save-bottom span {
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  @media (max-width: 720px) {
+    .attendance-save-bottom {
+      align-items: stretch;
+      flex-direction: column;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .attendance-input-header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .attendance-bulk-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .attendance-save-all {
+      width: 100%;
+    }
+
+    .attendance-table th,
+    .attendance-table td {
+      min-width: 120px;
+    }
+  }
 </style>
-
-
 
