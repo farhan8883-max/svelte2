@@ -5,6 +5,7 @@
   import QRCode from "qrcode";
   import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
   import { goto } from "$app/navigation";
+  import * as XLSX from "xlsx";
 
   /* =========================
      INTERFACES
@@ -193,8 +194,8 @@
   let gradeSemester = "1";
   let gradeTask: number | string = "";
   let gradeDailyTest: number | string = "";
-  let gradePTS: number | string = "";
-  let gradePAS: number | string = "";
+  let gradeUjiKompetensi1: number | string = "";
+  let gradeUjiKompetensi2: number | string = "";
   let gradeCharacter: number | string = "";
   let gradeSchoolExam: number | string = "";
 
@@ -991,8 +992,8 @@
     gradeSemester = gradeFilterSemester;
     gradeTask = "";
     gradeDailyTest = "";
-    gradePTS = "";
-    gradePAS = "";
+    gradeUjiKompetensi1 = "";
+    gradeUjiKompetensi2 = "";
     gradeCharacter = "";
     gradeSchoolExam = "";
   }
@@ -1018,8 +1019,8 @@
     gradeSemester = String(grade.semester);
     gradeTask = grade.nilai_tugas ?? "";
     gradeDailyTest = grade.nilai_ulangan_harian ?? "";
-    gradePTS = grade.nilai_pts ?? "";
-    gradePAS = grade.nilai_pas ?? "";
+    gradeUjiKompetensi1 = grade.nilai_pts ?? "";
+    gradeUjiKompetensi2 = grade.nilai_pas ?? "";
     gradeCharacter = grade.nilai_sikap_karakter ?? "";
     gradeSchoolExam = grade.nilai_ujian_sekolah ?? "";
     showGradeModal = true;
@@ -1048,7 +1049,7 @@
       return;
     }
 
-    const values = [gradeTask, gradeDailyTest, gradePTS, gradePAS, gradeCharacter, gradeSchoolExam]
+    const values = [gradeTask, gradeDailyTest, gradeUjiKompetensi1, gradeUjiKompetensi2, gradeCharacter, gradeSchoolExam]
       .map(normalizeGrade);
 
     if (values.some(value => value === undefined)) {
@@ -1120,6 +1121,354 @@
 
   function getGradeClassName(classId: number) {
     return classes.find(item => item.id === classId)?.name || "-";
+  }
+
+  function cleanFileName(value: unknown, fallback = "semua") {
+    const text = String(value ?? "")
+      .trim()
+      .replace(/[\\/:*?"<>|]+/g, "-")
+      .replace(/\s+/g, "-");
+
+    return text || fallback;
+  }
+
+  function makeSheetName(name: string, usedNames: Set<string>) {
+    const base = String(name || "Tanpa-Nama")
+      .replace(/[\\/:*?"<>|\[\]]+/g, "-")
+      .trim()
+      .substring(0, 31) || "Tanpa-Nama";
+
+    let result = base;
+    let counter = 1;
+
+    while (usedNames.has(result)) {
+      const suffix = `-${counter}`;
+      result = `${base.substring(0, 31 - suffix.length)}${suffix}`;
+      counter += 1;
+    }
+
+    usedNames.add(result);
+    return result;
+  }
+
+  function setExcelColumnWidths(
+    sheet: XLSX.WorkSheet,
+    widths: number[]
+  ) {
+    sheet["!cols"] = widths.map((wch) => ({ wch }));
+  }
+
+  function exportGradesToExcel() {
+    if (!filteredGrades.length) {
+      showToast("Tidak ada data nilai yang dapat diekspor.", true);
+      return;
+    }
+
+    try {
+      const includeStudent = currentUser?.role !== "santri";
+
+      const headers = [
+        ...(includeStudent ? ["Nama Santri"] : []),
+        "Kelas",
+        "Mata Pelajaran",
+        "Tahun Ajaran",
+        "Semester",
+        "Uji Kompetensi 1",
+        "Uji Kompetensi 2",
+        "Tugas",
+        "UH",
+        "Ujian Sekolah",
+        "Sikap",
+        "Nilai Akhir"
+      ];
+
+      const getGradeRow = (grade: StudentGrade) => [
+        ...(includeStudent
+          ? [getGradeStudentName(grade.user_id)]
+          : []),
+        getGradeClassName(grade.class_id),
+        grade.subject || "-",
+        grade.academic_year || "-",
+        grade.semester,
+        grade.nilai_pts ?? "-",
+        grade.nilai_pas ?? "-",
+        grade.nilai_tugas ?? "-",
+        grade.nilai_ulangan_harian ?? "-",
+        grade.nilai_ujian_sekolah ?? "-",
+        grade.nilai_sikap_karakter ?? "-",
+        Number(getGradeAverage(grade))
+      ];
+
+      const workbook = XLSX.utils.book_new();
+
+      /* ========================================================
+         1. SHEET REKAP SEMUA
+      ======================================================== */
+
+      const allRows = filteredGrades.map(getGradeRow);
+
+      const allData = [
+        ["REKAP NILAI SANTRI"],
+        [],
+        ["Tahun Ajaran", gradeFilterAcademicYear || "Semua"],
+        ["Semester", gradeFilterSemester || "Semua"],
+        [
+          "Kelas",
+          gradeFilterClass
+            ? getGradeClassName(Number(gradeFilterClass))
+            : "Semua"
+        ],
+        [
+          "Santri",
+          gradeFilterStudent
+            ? getGradeStudentName(Number(gradeFilterStudent))
+            : "Semua"
+        ],
+        [],
+        headers,
+        ...allRows
+      ];
+
+      const allSheet = XLSX.utils.aoa_to_sheet(allData);
+
+      allSheet["!merges"] = [
+        {
+          s: { r: 0, c: 0 },
+          e: { r: 0, c: headers.length - 1 }
+        }
+      ];
+
+      setExcelColumnWidths(allSheet, [
+        ...(includeStudent ? [28] : []),
+        20,
+        28,
+        18,
+        12,
+        20,
+        20,
+        15,
+        15,
+        18,
+        15,
+        15
+      ]);
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        allSheet,
+        "Rekap Semua"
+      );
+
+      /* ========================================================
+         2. KELOMPOKKAN NILAI BERDASARKAN NAMA SANTRI
+      ======================================================== */
+
+      const gradesByStudent = new Map<string, StudentGrade[]>();
+
+      filteredGrades.forEach((grade) => {
+        const name = getGradeStudentName(grade.user_id);
+
+        if (!gradesByStudent.has(name)) {
+          gradesByStudent.set(name, []);
+        }
+
+        gradesByStudent.get(name)!.push(grade);
+      });
+
+      /* ========================================================
+         3. SHEET REKAP PER NAMA
+      ======================================================== */
+
+      const summaryRows = Array.from(
+        gradesByStudent.entries()
+      ).map(([studentName, studentGrades]) => {
+        const values = studentGrades
+          .map((grade) => Number(getGradeAverage(grade)))
+          .filter((value) => Number.isFinite(value));
+
+        const average = values.length
+          ? values.reduce((sum, value) => sum + value, 0) / values.length
+          : 0;
+
+        const className = studentGrades.length
+          ? getGradeClassName(studentGrades[0].class_id)
+          : "-";
+
+        return [
+          studentName,
+          className,
+          studentGrades.length,
+          Number(average.toFixed(2))
+        ];
+      });
+
+      const summaryData = [
+        ["REKAP NILAI PER NAMA"],
+        [],
+        [
+          "Tahun Ajaran",
+          gradeFilterAcademicYear || "Semua"
+        ],
+        ["Semester", gradeFilterSemester || "Semua"],
+        [],
+        [
+          "Nama Santri",
+          "Kelas",
+          "Jumlah Mata Pelajaran",
+          "Rata-rata Nilai Akhir"
+        ],
+        ...summaryRows
+      ];
+
+      const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
+
+      summarySheet["!merges"] = [
+        {
+          s: { r: 0, c: 0 },
+          e: { r: 0, c: 3 }
+        }
+      ];
+
+      setExcelColumnWidths(summarySheet, [
+        30,
+        20,
+        25,
+        25
+      ]);
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        summarySheet,
+        "Rekap Per Nama"
+      );
+
+      /* ========================================================
+         4. SATU SHEET UNTUK SETIAP SANTRI
+      ======================================================== */
+
+      const usedSheetNames = new Set<string>([
+        "Rekap Semua",
+        "Rekap Per Nama"
+      ]);
+
+      gradesByStudent.forEach((studentGrades, studentName) => {
+        const sheetName = makeSheetName(
+          studentName,
+          usedSheetNames
+        );
+
+        const className = studentGrades.length
+          ? getGradeClassName(studentGrades[0].class_id)
+          : "-";
+
+        const studentHeaders = [
+          "Mata Pelajaran",
+          "Tahun Ajaran",
+          "Semester",
+          "Uji Kompetensi 1",
+          "Uji Kompetensi 2",
+          "Tugas",
+          "UH",
+          "Ujian Sekolah",
+          "Sikap",
+          "Nilai Akhir"
+        ];
+
+        const studentRows = studentGrades.map((grade) => [
+          grade.subject || "-",
+          grade.academic_year || "-",
+          grade.semester,
+          grade.nilai_pts ?? "-",
+          grade.nilai_pas ?? "-",
+          grade.nilai_tugas ?? "-",
+          grade.nilai_ulangan_harian ?? "-",
+          grade.nilai_ujian_sekolah ?? "-",
+          grade.nilai_sikap_karakter ?? "-",
+          Number(getGradeAverage(grade))
+        ]);
+
+        const studentSheet = XLSX.utils.aoa_to_sheet([
+          ["REKAP NILAI SANTRI"],
+          [],
+          ["Nama Santri", studentName],
+          ["Kelas", className],
+          ["Tahun Ajaran", gradeFilterAcademicYear || "Semua"],
+          ["Semester", gradeFilterSemester || "Semua"],
+          [],
+          studentHeaders,
+          ...studentRows
+        ]);
+
+        studentSheet["!merges"] = [
+          {
+            s: { r: 0, c: 0 },
+            e: { r: 0, c: studentHeaders.length - 1 }
+          }
+        ];
+
+        setExcelColumnWidths(studentSheet, [
+          28,
+          18,
+          12,
+          20,
+          20,
+          15,
+          15,
+          18,
+          15,
+          15
+        ]);
+
+        XLSX.utils.book_append_sheet(
+          workbook,
+          studentSheet,
+          sheetName
+        );
+      });
+
+      /* ========================================================
+         5. NAMA FILE
+      ======================================================== */
+
+      const className = gradeFilterClass
+        ? cleanFileName(
+            getGradeClassName(Number(gradeFilterClass)),
+            "semua-kelas"
+          )
+        : "semua-kelas";
+
+      const studentName = gradeFilterStudent
+        ? cleanFileName(
+            getGradeStudentName(Number(gradeFilterStudent)),
+            "semua-santri"
+          )
+        : "semua-santri";
+
+      const academicYear = cleanFileName(
+        gradeFilterAcademicYear,
+        "semua-tahun"
+      );
+
+      const semester = cleanFileName(
+        gradeFilterSemester,
+        "semua"
+      );
+
+      const fileName =
+        `rekap-nilai-${className}-${studentName}-${academicYear}-semester-${semester}.xlsx`;
+
+      XLSX.writeFile(workbook, fileName);
+
+      showToast(
+        `✓ Excel berhasil dibuat: ${gradesByStudent.size} santri.`
+      );
+    } catch (error) {
+      console.error("Gagal membuat Excel:", error);
+      showToast(
+        "Gagal membuat file Excel. Periksa console untuk detail error.",
+        true
+      );
+    }
   }
 
 
@@ -3533,6 +3882,9 @@
                 <button class="btn-secondary" on:click={openStudentClassModal}>👨‍🎓 Atur Kelas Santri</button>
                 <button class="btn-primary" on:click={openAddGrade}>➕ Input Nilai</button>
               {/if}
+              <button class="btn-secondary" on:click={exportGradesToExcel} disabled={gradesLoading || filteredGrades.length === 0}>
+                📥 Export Excel
+              </button>
               <button class="btn-secondary" on:click={refreshGradeData} disabled={gradesLoading}>🔄 Muat Ulang</button>
               <button class="btn-back" on:click={() => changeView("home")}>← Kembali</button>
             </div>
@@ -3586,12 +3938,12 @@
                   {#if currentUser?.role !== "santri"}<th>Santri</th>{/if}
                   <th>Kelas</th>
                   <th>Mata Pelajaran</th>
+                  <th>Uji Kompetensi 1</th>
+                  <th>Uji Kompetensi 2</th>
                   <th>Tugas</th>
                   <th>UH</th>
-                  <th>PTS</th>
-                  <th>PAS</th>
-                  <th>Sikap</th>
                   <th>Ujian Sekolah</th>
+                  <th>Sikap</th>
                   <th>Nilai Akhir</th>
                   {#if currentUser?.role === "admin" || currentUser?.role === "ustad"}<th>Aksi</th>{/if}
                 </tr>
@@ -3611,12 +3963,12 @@
                       {#if currentUser?.role !== "santri"}<td>{getGradeStudentName(grade.user_id)}</td>{/if}
                       <td>{getGradeClassName(grade.class_id)}</td>
                       <td>{grade.subject || "-"}</td>
-                      <td>{grade.nilai_tugas ?? "-"}</td>
-                      <td>{grade.nilai_ulangan_harian ?? "-"}</td>
                       <td>{grade.nilai_pts ?? "-"}</td>
                       <td>{grade.nilai_pas ?? "-"}</td>
-                      <td>{grade.nilai_sikap_karakter ?? "-"}</td>
+                      <td>{grade.nilai_tugas ?? "-"}</td>
+                      <td>{grade.nilai_ulangan_harian ?? "-"}</td>
                       <td>{grade.nilai_ujian_sekolah ?? "-"}</td>
+                      <td>{grade.nilai_sikap_karakter ?? "-"}</td>
                       <td><strong>{getGradeAverage(grade)}</strong></td>
                       {#if currentUser?.role === "admin" || currentUser?.role === "ustad"}
                         <td>
@@ -4532,10 +4884,10 @@
           </select>
         </div>
 
+        <div class="form-group-modal"><label>Uji Kompetensi 1</label><input type="number" min="0" max="100" bind:value={gradeUjiKompetensi1} /></div>
+        <div class="form-group-modal"><label>Uji Kompetensi 2</label><input type="number" min="0" max="100" bind:value={gradeUjiKompetensi2} /></div>
         <div class="form-group-modal"><label>Nilai Tugas</label><input type="number" min="0" max="100" bind:value={gradeTask} /></div>
         <div class="form-group-modal"><label>Nilai Ulangan Harian</label><input type="number" min="0" max="100" bind:value={gradeDailyTest} /></div>
-        <div class="form-group-modal"><label>Penilaian Tengah Semester</label><input type="number" min="0" max="100" bind:value={gradePTS} /></div>
-        <div class="form-group-modal"><label>Penilaian Akhir Semester</label><input type="number" min="0" max="100" bind:value={gradePAS} /></div>
         <div class="form-group-modal"><label>Nilai Sikap / Karakter</label><input type="number" min="0" max="100" bind:value={gradeCharacter} /></div>
         <div class="form-group-modal"><label>Nilai Ujian Sekolah</label><input type="number" min="0" max="100" bind:value={gradeSchoolExam} /></div>
       </div>
