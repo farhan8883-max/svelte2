@@ -126,6 +126,7 @@
   let loadingPengumuman = false;
   let loadingNilai = false;
   let nilaiList: StudentGrade[] = [];
+  let selectedSemester: 1 | 2 = 1;
 
   /* =========================================================
      PROFILE
@@ -262,19 +263,39 @@
 
   let jadwalList: JadwalItem[] = [
     {
-      hari: "Senin - Jumat",
-      kegiatan: "KBM & Mengaji Setoran Al-Qur'an",
-      waktu: "08:00 - 15:30"
+      hari: "Senin - Sabtu",
+      kegiatan: "Qiyamul Lail & Shalat Subuh",
+      waktu: "04.00 – 05.00 WIB"
     },
     {
-      hari: "Sabtu",
+      hari: "Senin - Sabtu",
       kegiatan: "Ekstrakurikuler & Olahraga",
-      waktu: "08:00 - 11:30"
+      waktu: "05.00 – 06.00 WIB"
+    },
+    {
+      hari: "Senin - Sabtu",
+      kegiatan: "Pelajaran Akademik (MTs / MA)",
+      waktu: "07.00 – 12.00 WIB"
+    },
+    {
+      hari: "Senin - Sabtu",
+      kegiatan: "Pelajaran Diniyah",
+      waktu: "13.00 – 14.30 WIB"
+    },
+    {
+      hari: "Senin - Sabtu",
+      kegiatan: "Olahraga / Ekstrakurikuler",
+      waktu: "16.00 – 17.30 WIB"
+    },
+    {
+      hari: "Senin - Sabtu",
+      kegiatan: "Tahfidz & Murajaah",
+      waktu: "18.30 – 20.00"
     },
     {
       hari: "Minggu",
-      kegiatan: "Kunjungan Wali Santri / Istirahat",
-      waktu: "09:00 - 16:00"
+      kegiatan: "Libur / Kegiatan Khusus",
+      waktu: "00 00"
     }
   ];
 
@@ -765,6 +786,7 @@
         nilai_akhir
       `)
       .eq("user_id", user.id)
+      .eq("semester", selectedSemester)
       .order("subject", { ascending: true });
 
     loadingNilai = false;
@@ -1060,6 +1082,93 @@
         "Gagal menyalin nomor rekening"
       );
     }
+  }
+
+  /* =========================================================
+     DOWNLOAD RAPORT SEKOLAH
+  ========================================================= */
+
+  function downloadRaport() {
+    if (!nilaiList.length) {
+      alert("Belum ada nilai untuk semester yang dipilih.");
+      return;
+    }
+
+    const namaSantri = user?.nama || user?.username || "Santri";
+    const kelasSantri = user?.kelas || "-";
+    const semesterLabel = selectedSemester === 1 ? "Semester 1" : "Semester 2";
+
+    const rows = nilaiList.map((item) => `
+      <tr>
+        <td>${item.subject || "-"}</td>
+        <td>${item.nilai_pts ?? "-"}</td>
+        <td>${item.nilai_pas ?? "-"}</td>
+        <td>${item.nilai_tugas ?? "-"}</td>
+        <td>${item.nilai_ulangan_harian ?? "-"}</td>
+        <td>${item.nilai_sikap_karakter ?? "-"}</td>
+        <td>${item.nilai_ujian_sekolah ?? "-"}</td>
+        <td>${item.nilai_akhir ?? "-"}</td>
+      </tr>
+    `).join("");
+
+    const raportHtml = `<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Raport ${namaSantri} - Daarulhikam - ${semesterLabel}</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 32px; color: #111; }
+  .kop { text-align: center; border-bottom: 3px solid #111; padding-bottom: 12px; margin-bottom: 18px; }
+  .kop h1 { margin: 0; font-size: 24px; }
+  .kop h2 { margin: 4px 0; font-size: 18px; }
+  .kop p { margin: 2px 0; font-size: 12px; }
+  .identitas { width: 100%; margin-bottom: 18px; border-collapse: collapse; }
+  .identitas td { padding: 5px 8px; }
+  .identitas td:first-child, .identitas td:nth-child(3) { font-weight: bold; width: 14%; }
+  table.nilai { width: 100%; border-collapse: collapse; }
+  table.nilai th, table.nilai td { border: 1px solid #333; padding: 7px 6px; text-align: center; font-size: 11px; }
+  table.nilai th:first-child, table.nilai td:first-child { text-align: left; }
+  table.nilai th { background: #eee; }
+  .footer { margin-top: 45px; display: flex; justify-content: space-between; text-align: center; }
+  .ttd { width: 220px; }
+  .ttd-space { height: 70px; }
+  .print-btn { position: fixed; top: 15px; right: 15px; padding: 10px 14px; cursor: pointer; }
+  @media print { .print-btn { display:none; } body { margin: 15mm; } }
+</style>
+</head>
+<body>
+<button class="print-btn" onclick="window.print()">Cetak / Simpan PDF</button>
+<div class="kop">
+  <h1>DAARULHIKAM</h1>
+  <h2>RAPORT HASIL BELAJAR SANTRI</h2>
+  <p>${semesterLabel} &nbsp; | &nbsp; Tahun Pelajaran ${currentYear}</p>
+</div>
+<table class="identitas">
+  <tr><td>Nama Santri</td><td>${namaSantri}</td><td>Kelas</td><td>${kelasSantri}</td></tr>
+  <tr><td>Semester</td><td>${semesterLabel}</td><td>Sekolah</td><td>Daarulhikam</td></tr>
+</table>
+<table class="nilai">
+  <thead><tr>
+    <th>Mata Pelajaran</th><th>Kompetensi 1</th><th>Kompetensi 2</th><th>Tugas</th><th>Ulangan Harian</th><th>Sikap</th><th>Ujian Sekolah</th><th>Nilai Akhir</th>
+  </tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+<div class="footer">
+  <div class="ttd"><div>Orang Tua / Wali Santri</div><div class="ttd-space"></div><strong>________________________</strong></div>
+  <div class="ttd"><div>Daarulhikam, ${new Date().toLocaleDateString("id-ID")}</div><div class="ttd-space"></div><strong>________________________</strong><br>Wali Kelas</div>
+</div>
+</body>
+</html>`;
+
+    const blob = new Blob([raportHtml], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Raport_Daarulhikam_${namaSantri.replace(/\s+/g, "_")}_${semesterLabel.replace(/\s+/g, "_")}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   /* =========================================================
@@ -2904,10 +3013,17 @@
       <div class="page-card">
         <div class="card-header-flex">
           <div>
-            <h3>Nilai Akademik Santri</h3>
-            <p class="sub-desc margin-0">Nilai tugas, ulangan harian, PTS, PAS, sikap, ujian sekolah, dan nilai akhir.</p>
+            <h3>Raport Akademik Santri</h3>
+            <p class="sub-desc margin-0">Raport Daarulhikam untuk semester 1 dan semester 2.</p>
           </div>
-          <button class="btn-export" on:click={loadNilai}>🔄 Refresh</button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <select bind:value={selectedSemester} on:change={loadNilai} class="form-control" aria-label="Pilih semester">
+              <option value={1}>Semester 1</option>
+              <option value={2}>Semester 2</option>
+            </select>
+            <button class="btn-export" on:click={loadNilai}>🔄 Refresh</button>
+            <button class="btn-export" on:click={downloadRaport} disabled={loadingNilai || nilaiList.length === 0}>⬇️ Download Raport</button>
+          </div>
         </div>
 
         {#if loadingNilai}
@@ -2920,10 +3036,10 @@
               <thead>
                 <tr>
                   <th>Mata Pelajaran</th>
+                  <th>Kompetensi 1</th>
+                  <th>Kompetensi 2</th>
                   <th>Tugas</th>
                   <th>Ulangan Harian</th>
-                  <th>PTS</th>
-                  <th>PAS</th>
                   <th>Sikap</th>
                   <th>Ujian Sekolah</th>
                   <th>Nilai Akhir</th>
@@ -2933,10 +3049,10 @@
                 {#each nilaiList as item}
                   <tr>
                     <td class="font-semibold">{item.subject}</td>
-                    <td>{item.nilai_tugas ?? "-"}</td>
-                    <td>{item.nilai_ulangan_harian ?? "-"}</td>
                     <td>{item.nilai_pts ?? "-"}</td>
                     <td>{item.nilai_pas ?? "-"}</td>
+                    <td>{item.nilai_tugas ?? "-"}</td>
+                    <td>{item.nilai_ulangan_harian ?? "-"}</td>
                     <td>{item.nilai_sikap_karakter ?? "-"}</td>
                     <td>{item.nilai_ujian_sekolah ?? "-"}</td>
                     <td class="font-semibold">{item.nilai_akhir ?? "-"}</td>
