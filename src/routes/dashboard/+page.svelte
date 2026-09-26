@@ -3,6 +3,7 @@
   import { supabase } from "$lib/supabaseClient";
   import { onMount, tick } from "svelte";
   import { goto } from "$app/navigation";
+import * as XLSX from "xlsx";
 
   /* =========================
      INTERFACES
@@ -93,7 +94,8 @@
     | "schedule"
     | "barcode"
     | "topup"
-    | "announcement";
+    | "announcement"
+    | "santri-report";
 
   /* =========================
      MONTHS
@@ -184,6 +186,103 @@
   let totalSaldo = 0;
   let totalPemasukan = 0;
   let totalPengeluaran = 0;
+
+  /* =========================
+     EXPORT EXCEL
+  ========================= */
+
+  function exportSPPToExcel() {
+    const rows = filteredSantri.map((santri, index) => {
+      const record = sppData[santri.id];
+
+      return {
+        No: index + 1,
+        "ID Santri": santri.id,
+        "Nama Santri": santri.full_name || "",
+        Username: santri.username || "",
+        Kelas: santri.class_name || "",
+        Tahun: selectedYear,
+        Jan: record?.january ? "Lunas" : "Belum",
+        Feb: record?.february ? "Lunas" : "Belum",
+        Mar: record?.march ? "Lunas" : "Belum",
+        Apr: record?.april ? "Lunas" : "Belum",
+        Mei: record?.may ? "Lunas" : "Belum",
+        Jun: record?.june ? "Lunas" : "Belum",
+        Jul: record?.july ? "Lunas" : "Belum",
+        Agu: record?.august ? "Lunas" : "Belum",
+        Sep: record?.september ? "Lunas" : "Belum",
+        Okt: record?.october ? "Lunas" : "Belum",
+        Nov: record?.november ? "Lunas" : "Belum",
+        Des: record?.december ? "Lunas" : "Belum",
+        "Total Lunas": getLunasCount(santri.id),
+        "Sisa Bulan": 12 - getLunasCount(santri.id)
+      };
+    });
+
+    if (rows.length === 0) {
+      showToast("Tidak ada data SPP untuk diekspor.", true);
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    worksheet["!cols"] = [
+      { wch: 5 }, { wch: 12 }, { wch: 28 }, { wch: 20 }, { wch: 18 },
+      { wch: 10 }, ...Array(12).fill({ wch: 10 }), { wch: 14 }, { wch: 14 }
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "SPP");
+
+    XLSX.writeFile(
+      workbook,
+      `SPP_Santri_${selectedYear}.xlsx`
+    );
+
+    showToast("✓ Data SPP berhasil diekspor ke Excel.");
+  }
+
+  function exportAttendanceToExcel() {
+    const rows = filteredAttendanceSantri.map((santri, index) => {
+      const attendance = getAttendance(santri.id);
+
+      return {
+        No: index + 1,
+        "ID Santri": santri.id,
+        "Nama Santri": santri.full_name || "",
+        Username: santri.username || "",
+        Kelas: santri.class_name || "",
+        Jenjang: getSchoolLevel(santri.class_name),
+        Status: attendance ? attendanceLabel(attendance.status) : "Belum diisi",
+        Tanggal: attendanceDate
+      };
+    });
+
+    if (rows.length === 0) {
+      showToast("Tidak ada data absensi untuk diekspor.", true);
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    worksheet["!cols"] = [
+      { wch: 5 }, { wch: 12 }, { wch: 28 }, { wch: 20 },
+      { wch: 18 }, { wch: 12 }, { wch: 16 }, { wch: 14 }
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Absensi");
+
+    const safeSection = attendanceSection.toLowerCase();
+    const safeClass = attendanceSection === "SMP" && attendanceSmpClass
+      ? `_Kelas_${attendanceSmpClass}`
+      : "";
+
+    XLSX.writeFile(
+      workbook,
+      `Absensi_${attendanceDate}_${safeSection}${safeClass}.xlsx`
+    );
+
+    showToast("✓ Data absensi berhasil diekspor ke Excel.");
+  }
 
   /* =========================
      TOAST
@@ -308,6 +407,16 @@
 
   let showRoleModal = false;
   let selectedRole: "admin" | "santri" | "ustad" | null = null;
+
+  /* =========================
+     SANTRI REPORT PAGE
+  ========================= */
+
+  let selectedSantriReport: User | null = null;
+  let santriReportSpp: SPPRecord | null = null;
+  let santriReportAttendance: Attendance[] = [];
+  let santriReportEntries: Entry[] = [];
+  let isLoadingSantriReport = false;
 
   /* =========================
      INITIAL LOAD
@@ -475,6 +584,68 @@
     if (role === "ustad") return "Ustad";
     return "User";
   }
+
+  async function openSantriReport(user: User) {
+    if (!isAdmin || user.role !== "santri") {
+      showToast("❌ Hanya admin yang dapat melihat laporan santri.", true);
+      return;
+    }
+
+    selectedSantriReport = user;
+    activeView = "santri-report";
+    isLoadingSantriReport = true;
+    santriReportSpp = null;
+    santriReportAttendance = [];
+    santriReportEntries = [];
+
+    try {
+      const [sppResult, attendanceResult, entriesResult] = await Promise.all([
+        supabase.from("spp_payments").select("*").eq("user_id", user.id).eq("year", selectedYear).maybeSingle(),
+        supabase.from("attendance").select("*").eq("user_id", user.id).order("date", { ascending: false }),
+        supabase.from("entries").select("*").eq("user_id", user.id).order("date", { ascending: false }).order("id", { ascending: false })
+      ]);
+
+      if (sppResult.error) throw sppResult.error;
+      if (attendanceResult.error) throw attendanceResult.error;
+      if (entriesResult.error) throw entriesResult.error;
+
+      santriReportSpp = (sppResult.data || null) as SPPRecord | null;
+      santriReportAttendance = (attendanceResult.data || []) as Attendance[];
+      santriReportEntries = (entriesResult.data || []) as Entry[];
+    } catch (error: any) {
+      console.error("Gagal memuat laporan santri:", error);
+      showToast("❌ Gagal memuat laporan santri: " + (error?.message || "Terjadi kesalahan."), true);
+    } finally {
+      isLoadingSantriReport = false;
+    }
+  }
+
+  function closeSantriReport() {
+    selectedSantriReport = null;
+    santriReportSpp = null;
+    santriReportAttendance = [];
+    santriReportEntries = [];
+    activeView = "users";
+  }
+
+  function getReportLunasCount() {
+    if (!santriReportSpp) return 0;
+    return months.filter(month => Boolean(santriReportSpp?.[month.key])).length;
+  }
+
+  function getReportAttendanceCount(status: Attendance["status"]) {
+    return santriReportAttendance.filter(item => item.status === status).length;
+  }
+
+  $: santriReportPemasukan = santriReportEntries
+    .filter(entry => entry.kind === "pemasukan")
+    .reduce((total, entry) => total + Number(entry.amount || 0), 0);
+
+  $: santriReportPengeluaran = santriReportEntries
+    .filter(entry => entry.kind === "pengeluaran")
+    .reduce((total, entry) => total + Number(entry.amount || 0), 0);
+
+  $: santriReportSaldo = santriReportPemasukan - santriReportPengeluaran;
 
   /* =========================
      ADMIN CHECK
@@ -2604,14 +2775,24 @@ async function deleteUser(
 
             </div>
 
+            <div class="action-group-top">
 
-            <button
-              class="btn-back"
-              on:click={() =>
-                changeView("home")}
-            >
-              ← Kembali
-            </button>
+              <button
+                class="btn-primary"
+                on:click={exportSPPToExcel}
+              >
+                📊 Export Excel
+              </button>
+
+              <button
+                class="btn-back"
+                on:click={() =>
+                  changeView("home")}
+              >
+                ← Kembali
+              </button>
+
+            </div>
 
           </div>
 
@@ -3049,6 +3230,16 @@ async function deleteUser(
                         class="action-buttons"
                       >
 
+                        {#if user.role === "santri"}
+                          <button
+                            class="btn-icon report"
+                            title="Lihat Laporan Santri"
+                            on:click={() => openSantriReport(user)}
+                          >
+                            👁️
+                          </button>
+                        {/if}
+
                         <button
   class="btn-icon"
   title="Edit"
@@ -3116,14 +3307,24 @@ async function deleteUser(
 
             </div>
 
+            <div class="action-group-top">
 
-            <button
-              class="btn-back"
-              on:click={() =>
-                changeView("home")}
-            >
-              ← Kembali
-            </button>
+              <button
+                class="btn-primary"
+                on:click={exportAttendanceToExcel}
+              >
+                📊 Export Excel
+              </button>
+
+              <button
+                class="btn-back"
+                on:click={() =>
+                  changeView("home")}
+              >
+                ← Kembali
+              </button>
+
+            </div>
 
           </div>
 
@@ -4039,6 +4240,95 @@ async function deleteUser(
 
           </form>
 
+        </div>
+
+      {:else if activeView === "santri-report"}
+
+        <div class="bca-card santri-report-page" role="region" aria-labelledby="santri-report-title">
+          <div class="santri-report-page-header">
+            <div>
+              <h3 id="santri-report-title">👁️ Laporan Akun Santri</h3>
+              <p class="sub-description">Melihat data akun santri secara lengkap tanpa mengubah data milik santri.</p>
+            </div>
+            <button type="button" class="btn-secondary" on:click={closeSantriReport}>← Kembali ke Kelola User</button>
+          </div>
+
+          {#if selectedSantriReport}
+            <div class="santri-report-profile">
+              <div class="santri-report-avatar">{selectedSantriReport.username.charAt(0).toUpperCase()}</div>
+              <div class="santri-report-profile-info">
+                <h4>{selectedSantriReport.full_name || selectedSantriReport.username}</h4>
+                <p>@{selectedSantriReport.username}</p>
+                <div class="santri-report-meta">
+                  <span>🆔 ID: {selectedSantriReport.id}</span>
+                  <span>📧 {selectedSantriReport.email || "-"}</span>
+                  <span>🏫 {selectedSantriReport.class_name || "Belum ada kelas"}</span>
+                </div>
+              </div>
+            </div>
+          {/if}
+
+          {#if isLoadingSantriReport}
+            <div class="santri-report-loading">⏳ Memuat laporan santri...</div>
+          {:else}
+            <div class="santri-report-stats">
+              <div class="santri-report-stat"><span>SPP {selectedYear}</span><strong>{getReportLunasCount()}/12</strong><small>Bulan lunas</small></div>
+              <div class="santri-report-stat"><span>Hadir</span><strong>{getReportAttendanceCount("hadir")}</strong><small>Riwayat absensi</small></div>
+              <div class="santri-report-stat"><span>Izin / Sakit</span><strong>{getReportAttendanceCount("izin") + getReportAttendanceCount("sakit")}</strong><small>Riwayat absensi</small></div>
+              <div class="santri-report-stat"><span>Alpha</span><strong>{getReportAttendanceCount("alpha")}</strong><small>Riwayat absensi</small></div>
+              <div class="santri-report-stat"><span>Saldo</span><strong>Rp {formatRupiah(santriReportSaldo)}</strong><small>Transaksi tercatat</small></div>
+            </div>
+
+            <div class="santri-report-section">
+              <div class="santri-report-section-header"><h4>💳 Status SPP {selectedYear}</h4><span class="badge-count">{getReportLunasCount()}/12</span></div>
+              <div class="santri-report-months">
+                {#each months as month}
+                  <div class:paid={Boolean(santriReportSpp?.[month.key])} class="santri-report-month">
+                    <span>{month.label}</span>
+                    <strong>{santriReportSpp?.[month.key] ? "✓ Lunas" : "✕ Belum"}</strong>
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <div class="santri-report-grid">
+              <div class="santri-report-section">
+                <div class="santri-report-section-header"><h4>📅 Riwayat Absensi</h4><span>{santriReportAttendance.length} data</span></div>
+                {#if santriReportAttendance.length === 0}
+                  <div class="santri-report-empty">Belum ada riwayat absensi.</div>
+                {:else}
+                  <div class="santri-report-table-wrap">
+                    <table class="data-table santri-report-table"><thead><tr><th>Tanggal</th><th>Status</th></tr></thead><tbody>
+                      {#each santriReportAttendance as item}
+                        <tr><td>{formatDate(item.date)}</td><td><span class={`attendance-report-badge ${item.status}`}>{attendanceLabel(item.status)}</span></td></tr>
+                      {/each}
+                    </tbody></table>
+                  </div>
+                {/if}
+              </div>
+
+              <div class="santri-report-section">
+                <div class="santri-report-section-header"><h4>💰 Riwayat Transaksi</h4><span>{santriReportEntries.length} data</span></div>
+                {#if santriReportEntries.length === 0}
+                  <div class="santri-report-empty">Belum ada transaksi.</div>
+                {:else}
+                  <div class="santri-report-table-wrap">
+                    <table class="data-table santri-report-table"><thead><tr><th>Tanggal</th><th>Nama</th><th>Jenis</th><th>Jumlah</th></tr></thead><tbody>
+                      {#each santriReportEntries as item}
+                        <tr><td>{formatDate(item.date)}</td><td>{item.name}</td><td><span class={`transaction-report-badge ${item.kind}`}>{item.kind === "pemasukan" ? "Masuk" : "Keluar"}</span></td><td>Rp {formatRupiah(item.amount)}</td></tr>
+                      {/each}
+                    </tbody></table>
+                  </div>
+                {/if}
+              </div>
+            </div>
+
+            <div class="santri-report-finance">
+              <div><span>Total Pemasukan</span><strong>Rp {formatRupiah(santriReportPemasukan)}</strong></div>
+              <div><span>Total Pengeluaran</span><strong>Rp {formatRupiah(santriReportPengeluaran)}</strong></div>
+              <div><span>Saldo Bersih</span><strong>Rp {formatRupiah(santriReportSaldo)}</strong></div>
+            </div>
+          {/if}
         </div>
 
       {/if}
@@ -7713,5 +8003,106 @@ async function deleteUser(
   .schedule-day-list { display: grid; gap: 20px; }
   .schedule-day-card { overflow: hidden; border: 1px solid #e5e7eb; border-radius: 14px; }
   .schedule-day-title { padding: 14px 18px; background: #f3f4f6; font-size: 18px; font-weight: 700; }
+
+
+  .santri-report-page {
+    width: 100%;
+    min-height: calc(100vh - 140px);
+    padding: 24px;
+  }
+  .santri-report-page-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 22px; }
+  .santri-report-page-header h3 { margin: 0 0 6px; }
+  .santri-report-profile { display: flex; align-items: center; gap: 18px; padding: 20px; border-radius: 16px; background: var(--card-bg, #f7f8fa); margin-bottom: 20px; }
+  .santri-report-avatar { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; font-size: 25px; font-weight: 700; background: #e8eefc; }
+  .santri-report-profile-info h4 { margin: 0 0 4px; font-size: 20px; }
+  .santri-report-profile-info p { margin: 0 0 10px; opacity: .7; }
+  .santri-report-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; }
+  .santri-report-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .santri-report-stat { padding: 18px; border: 1px solid rgba(0,0,0,.08); border-radius: 14px; background: var(--card-bg, #fff); }
+  .santri-report-stat span, .santri-report-stat small { display: block; opacity: .7; }
+  .santri-report-stat strong { display: block; margin: 7px 0 3px; font-size: 22px; }
+  .santri-report-section { padding: 18px; border: 1px solid rgba(0,0,0,.08); border-radius: 14px; background: var(--card-bg, #fff); margin-bottom: 18px; }
+  .santri-report-section-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .santri-report-section-header h4 { margin: 0; }
+  .santri-report-months { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+  .santri-report-month { padding: 12px; border-radius: 10px; background: #f3f4f6; text-align: center; }
+  .santri-report-month.paid { background: #e9f8ee; }
+  .santri-report-month span, .santri-report-month strong { display: block; }
+  .santri-report-month strong { margin-top: 4px; font-size: 12px; }
+  .santri-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .santri-report-table-wrap { overflow-x: auto; }
+  .santri-report-table { width: 100%; }
+  .santri-report-empty, .santri-report-loading { padding: 30px; text-align: center; opacity: .7; }
+  .santri-report-finance { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 4px; }
+  .santri-report-finance > div { padding: 18px; border-radius: 14px; background: var(--card-bg, #fff); border: 1px solid rgba(0,0,0,.08); }
+  .santri-report-finance span, .santri-report-finance strong { display: block; }
+  .santri-report-finance strong { margin-top: 6px; font-size: 20px; }
+  .attendance-report-badge, .transaction-report-badge { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; }
+  .transaction-report-badge.pemasukan { background: #e9f8ee; }
+  .transaction-report-badge.pengeluaran { background: #fdecec; }
+  .btn-icon.report { background: #eef4ff; }
+  /* =========================
+     RESPONSIVE LAPORAN SANTRI
+  ========================= */
+  .santri-report-page {
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .santri-report-table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .santri-report-table { min-width: 620px; }
+
+  @media (max-width: 1000px) {
+    .santri-report-page { padding: 20px; }
+    .santri-report-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .santri-report-grid { grid-template-columns: 1fr; }
+    .santri-report-finance { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .santri-report-months { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 768px) {
+    .santri-report-page { padding: 14px; min-height: auto; }
+    .santri-report-page-header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+    }
+    .santri-report-page-header > * { max-width: 100%; }
+    .santri-report-page-header button { width: 100%; }
+    .santri-report-profile {
+      padding: 16px;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .santri-report-avatar { flex: 0 0 52px; width: 52px; height: 52px; font-size: 20px; }
+    .santri-report-profile-info { min-width: 0; }
+    .santri-report-profile-info h4 { font-size: 17px; overflow-wrap: anywhere; }
+    .santri-report-meta { gap: 6px 12px; font-size: 12px; }
+    .santri-report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .santri-report-stat { padding: 14px; min-width: 0; }
+    .santri-report-stat strong { font-size: 18px; overflow-wrap: anywhere; }
+    .santri-report-section { padding: 14px; margin-bottom: 12px; }
+    .santri-report-section-header { align-items: flex-start; flex-direction: column; }
+    .santri-report-months { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+    .santri-report-month { padding: 9px 5px; }
+    .santri-report-finance { grid-template-columns: 1fr; gap: 10px; }
+  }
+
+  @media (max-width: 480px) {
+    .santri-report-page { padding: 10px; }
+    .santri-report-profile { flex-direction: column; }
+    .santri-report-avatar { flex-basis: 48px; width: 48px; height: 48px; }
+    .santri-report-stats { grid-template-columns: 1fr 1fr; }
+    .santri-report-stat { padding: 11px; }
+    .santri-report-stat strong { font-size: 16px; }
+    .santri-report-stat span, .santri-report-stat small { font-size: 11px; }
+    .santri-report-months { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .santri-report-section { padding: 11px; border-radius: 10px; }
+    .santri-report-table { min-width: 560px; font-size: 12px; }
+  }
 
 </style>
