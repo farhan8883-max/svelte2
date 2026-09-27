@@ -42,40 +42,43 @@
     username?: string;
   }
 
-  type Section = "market" | "products" | "history";
+  type Section = "market" | "products" | "history" | "finance";
+  type Category = "Semua" | "Jajanan" | "Barang" | "Tea";
+
+  const APP_TIME_ZONE = "Asia/Jakarta";
 
   let activeSection: Section = "market";
-
+  let sidebarOpen = false;
   let products: Product[] = [];
   let users: User[] = [];
   let cart: CartItem[] = [];
   let history: PurchaseHistory[] = [];
+  let financeEntries: Entry[] = [];
 
   let currentUser: User | null = null;
+  let currentDate = "";
+  let message = "";
   let loading = false;
   let productLoading = false;
   let historyLoading = false;
-  let message = "";
+  let financeLoading = false;
+
+  let categoryFilter: Category = "Semua";
+  let productSearch = "";
+  let historyDate = "";
+  let financeDate = "";
 
   let showCart = false;
   let showCheckout = false;
   let selectedUser = "";
   let selectedUserBalance = 0;
   let balanceLoading = false;
-
-  // Cache saldo supaya memilih santri yang sama tidak melakukan query berulang.
-  let balanceCache = new Map<string, number>();
-  let balanceRequestId = 0;
-
-  let productSearch = "";
   let userSearch = "";
 
   let showProductModal = false;
   let showDeleteModal = false;
   let editingProductId: number | null = null;
   let deletingProduct: Product | null = null;
-
-  let historyDate = "";
 
   let productForm = {
     name: "",
@@ -84,51 +87,8 @@
     image: ""
   };
 
-  onMount(async () => {
-    // Sinkronkan label "Hari Ini" dan tanggal aplikasi dengan WIB.
-    updateCurrentDate();
-    const dateTimer = window.setInterval(updateCurrentDate, 30_000);
-
-    const storedUser = localStorage.getItem("user");
-
-    if (!storedUser) {
-      goto("/login");
-      return;
-    }
-
-    try {
-      currentUser = JSON.parse(storedUser);
-    } catch {
-      localStorage.removeItem("user");
-      goto("/login");
-      return;
-    }
-
-    if (currentUser?.role !== "admin") {
-      alert("Akses ditolak");
-      goto("/");
-      return;
-    }
-
-    await Promise.all([
-      loadProducts(),
-      loadUsers(),
-      loadHistory()
-    ]);
-
-    // Bersihkan timer saat komponen dihancurkan.
-    return () => {
-      window.clearInterval(dateTimer);
-    };
-  });
-
-  // Zona waktu aplikasi: WIB / Asia/Jakarta.
-  // Jangan gunakan toISOString().split("T")[0] untuk tanggal bisnis,
-  // karena toISOString() memakai UTC dan bisa membuat tanggal mundur 1 hari
-  // saat waktu lokal Indonesia masih malam/dini hari.
-  const APP_TIME_ZONE = "Asia/Jakarta";
-
-  let currentDate = "";
+  let balanceCache = new Map<string, number>();
+  let balanceRequestId = 0;
 
   function getJakartaDate(): string {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -138,15 +98,13 @@
       day: "2-digit"
     }).formatToParts(new Date());
 
-    const year = parts.find((part) => part.type === "year")?.value ?? "";
-    const month = parts.find((part) => part.type === "month")?.value ?? "";
-    const day = parts.find((part) => part.type === "day")?.value ?? "";
-
+    const year = parts.find((p) => p.type === "year")?.value ?? "";
+    const month = parts.find((p) => p.type === "month")?.value ?? "";
+    const day = parts.find((p) => p.type === "day")?.value ?? "";
     return `${year}-${month}-${day}`;
   }
 
-  function todayDate(): string {
-    // Selalu hitung berdasarkan waktu WIB saat fungsi dipanggil.
+  function todayDate() {
     return getJakartaDate();
   }
 
@@ -158,93 +116,194 @@
     return new Intl.NumberFormat("id-ID").format(Number(value) || 0);
   }
 
-  // Saldo boleh bernilai negatif. Nilai negatif berarti santri sedang memiliki utang.
-  function debtAmount(balance: number) {
-    return Math.max(0, -Number(balance || 0));
-  }
-
-  function availableBalance(balance: number) {
-    return Math.max(0, Number(balance || 0));
-  }
-
   function formatDate(date: string) {
     if (!date) return "-";
-
     const [year, month, day] = date.split("-").map(Number);
     if (!year || !month || !day) return "-";
-
-    // Pakai tanggal ISO + offset WIB agar hasil konsisten di browser mana pun.
-    const dateValue = new Date(
-      `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00+07:00`
-    );
-
+    const value = new Date(`${date}T00:00:00+07:00`);
     return new Intl.DateTimeFormat("id-ID", {
       timeZone: APP_TIME_ZONE,
       weekday: "long",
       day: "2-digit",
       month: "long",
       year: "numeric"
-    }).format(dateValue);
+    }).format(value);
   }
 
   function formatDateShort(date: string) {
     if (!date) return "-";
-
-    const [year, month, day] = date.split("-").map(Number);
-    if (!year || !month || !day) return "-";
-
-    const dateValue = new Date(
-      `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00+07:00`
-    );
-
+    const value = new Date(`${date}T00:00:00+07:00`);
     return new Intl.DateTimeFormat("id-ID", {
       timeZone: APP_TIME_ZONE,
       day: "2-digit",
       month: "2-digit",
       year: "numeric"
-    }).format(dateValue);
+    }).format(value);
   }
+
+  function productCategory(product: Product): Exclude<Category, "Semua"> {
+    const name = product.name.toLowerCase();
+
+    if (
+      name.includes("tea") ||
+      name.includes("teh") ||
+      name.includes("matcha")
+    ) return "Tea";
+
+    if (
+      name.includes("coffee") ||
+      name.includes("kopi") ||
+      name.includes("latte") ||
+      name.includes("americano") ||
+      name.includes("espresso") ||
+      name.includes("cappuccino") ||
+      name.includes("mocha")
+    ) return "Jajanan";
+
+    return "Barang";
+  }
+
+  $: productKeyword = productSearch.toLowerCase().trim();
+  $: availableProducts = products.filter((p) => Number(p.stock) > 0);
+
+  $: filteredProducts = availableProducts.filter((product) => {
+    const matchesSearch = !productKeyword ||
+      product.name.toLowerCase().includes(productKeyword);
+    const matchesCategory =
+      categoryFilter === "Semua" ||
+      productCategory(product) === categoryFilter;
+    return matchesSearch && matchesCategory;
+  });
+
+  $: filteredHistory = history.filter((item) =>
+    !historyDate || item.date === historyDate
+  );
+
+  $: cartTotal = cart.reduce(
+    (sum, item) => sum + Number(item.product.price) * item.qty,
+    0
+  );
+
+  $: cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
+
+  $: filteredFinanceEntries = financeDate
+    ? financeEntries.filter((entry) => entry.date === financeDate)
+    : financeEntries;
+
+  function isSaleEntry(entry: Entry) {
+    return (
+      entry.kind === "pengeluaran" &&
+      entry.name.trim().toLowerCase().startsWith("beli ")
+    );
+  }
+
+  $: financeSales = filteredFinanceEntries
+    .filter(isSaleEntry)
+    .reduce((sum, entry) => sum + Number(entry.amount), 0);
+
+  $: financeExpenses = filteredFinanceEntries
+    .filter((entry) => entry.kind === "pengeluaran" && !isSaleEntry(entry))
+    .reduce((sum, entry) => sum + Number(entry.amount), 0);
+
+  $: financeIncome = filteredFinanceEntries
+    .filter((entry) => entry.kind === "pemasukan")
+    .reduce((sum, entry) => sum + Number(entry.amount), 0);
+
+  $: financeNet = financeSales + financeIncome - financeExpenses;
+
+  $: filteredUsers = users.filter((user) =>
+    user.username.toLowerCase().includes(userSearch.toLowerCase().trim())
+  );
+
+  $: selectedSantri = users.find(
+    (user) => String(user.id) === String(selectedUser)
+  ) || null;
 
   function changeSection(section: Section) {
     activeSection = section;
+    sidebarOpen = false;
     showCart = false;
 
-    if (section === "history") {
-      void loadHistory();
-    }
+    if (section === "history") void loadHistory();
+    if (section === "finance") void loadFinanceEntries();
 
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openCheckout() {
-    if (cart.length === 0) {
-      alert("Keranjang kosong");
+  function toggleSidebar() {
+    sidebarOpen = !sidebarOpen;
+  }
+
+  function closeSidebar() {
+    sidebarOpen = false;
+  }
+
+  function openCart() {
+    showCart = true;
+  }
+
+  function closeCart() {
+    showCart = false;
+  }
+
+  function addToCart(product: Product) {
+    if (Number(product.stock) <= 0) {
+      alert("Stock habis");
       return;
     }
 
-    // Setiap checkout baru dimulai dari keadaan bersih.
-    selectedUser = "";
-    selectedUserBalance = 0;
-    userSearch = "";
-    balanceLoading = false;
-    balanceRequestId += 1;
-    showCheckout = true;
+    const existing = cart.find((item) => item.product.id === product.id);
+
+    if (existing) {
+      if (existing.qty >= Number(product.stock)) {
+        alert("Stock tidak cukup");
+        return;
+      }
+
+      cart = cart.map((item) =>
+        item.product.id === product.id
+          ? { ...item, qty: item.qty + 1 }
+          : item
+      );
+      return;
+    }
+
+    cart = [...cart, { product, qty: 1 }];
   }
 
-  function closeCheckout() {
-    if (loading) return;
+  function increaseCart(productId: number) {
+    const item = cart.find((i) => i.product.id === productId);
+    const latest = products.find((p) => p.id === productId);
+    if (!item || !latest) return;
 
-    showCheckout = false;
-    selectedUser = "";
-    selectedUserBalance = 0;
-    userSearch = "";
-    balanceLoading = false;
-    balanceRequestId += 1;
+    if (item.qty >= Number(latest.stock)) {
+      alert("Stock tidak cukup");
+      return;
+    }
+
+    cart = cart.map((i) =>
+      i.product.id === productId ? { ...i, qty: i.qty + 1 } : i
+    );
   }
 
-  // =========================
-  // LOAD PRODUCTS
-  // =========================
+  function decreaseCart(productId: number) {
+    const item = cart.find((i) => i.product.id === productId);
+    if (!item) return;
+
+    if (item.qty <= 1) {
+      removeFromCart(productId);
+      return;
+    }
+
+    cart = cart.map((i) =>
+      i.product.id === productId ? { ...i, qty: i.qty - 1 } : i
+    );
+  }
+
+  function removeFromCart(productId: number) {
+    cart = cart.filter((i) => i.product.id !== productId);
+  }
+
   async function loadProducts() {
     const { data, error } = await supabase
       .from("products")
@@ -259,9 +318,6 @@
     products = (data || []) as Product[];
   }
 
-  // =========================
-  // LOAD USERS
-  // =========================
   async function loadUsers() {
     const { data, error } = await supabase
       .from("users")
@@ -270,16 +326,13 @@
       .order("username");
 
     if (error) {
-      console.log(error.message);
+      console.error(error.message);
       return;
     }
 
     users = (data || []) as User[];
   }
 
-  // =========================
-  // BALANCE / SELECT SANTRI
-  // =========================
   async function loadUserBalance(
     userId: string,
     forceRefresh = false
@@ -294,46 +347,36 @@
     balanceLoading = true;
 
     try {
-      // Ambil kolom yang diperlukan saja. Tidak perlu select("*").
       const { data: entries, error } = await supabase
         .from("entries")
         .select("amount,kind")
         .eq("user_id", userId);
 
       if (error) {
-        console.error("Gagal mengambil saldo:", error);
+        console.error(error.message);
         return null;
       }
 
-      // Saldo bersih = seluruh pemasukan - seluruh pengeluaran.
-      // Karena tidak dibatasi minimum 0, saldo negatif otomatis menjadi utang.
-      // Saat santri mengisi saldo lagi (kind = "pemasukan"), saldo negatif
-      // akan tertutup terlebih dahulu secara alami melalui perhitungan ini.
-      // Contoh: -Rp5.000 + pemasukan Rp10.000 = saldo Rp5.000.
-      const saldo = (entries || []).reduce((total, entry) => {
+      const balance = (entries || []).reduce((total, entry) => {
         const amount = Number(entry.amount) || 0;
         return entry.kind === "pemasukan"
           ? total + amount
           : total - amount;
       }, 0);
 
-      balanceCache = new Map(balanceCache).set(userId, saldo);
+      balanceCache = new Map(balanceCache).set(userId, balance);
 
-      // Jangan biarkan response query lama menimpa santri yang baru dipilih.
       if (requestId === balanceRequestId && selectedUser === userId) {
-        selectedUserBalance = saldo;
+        selectedUserBalance = balance;
       }
 
-      return saldo;
+      return balance;
     } finally {
-      if (requestId === balanceRequestId) {
-        balanceLoading = false;
-      }
+      if (requestId === balanceRequestId) balanceLoading = false;
     }
   }
 
   async function handleSelectUser(userId: string) {
-    // Update UI langsung, tanpa menunggu query database.
     selectedUser = userId;
 
     if (!userId) {
@@ -343,12 +386,11 @@
       return;
     }
 
-    const cachedBalance = balanceCache.get(userId);
-
-    if (cachedBalance !== undefined) {
+    const cached = balanceCache.get(userId);
+    if (cached !== undefined) {
       balanceRequestId += 1;
       balanceLoading = false;
-      selectedUserBalance = cachedBalance;
+      selectedUserBalance = cached;
       return;
     }
 
@@ -356,38 +398,333 @@
     await loadUserBalance(userId);
   }
 
-  // =========================
-  // PRODUCT MANAGEMENT
-  // =========================
+  function openCheckout() {
+    if (!cart.length) {
+      alert("Keranjang masih kosong");
+      return;
+    }
+
+    selectedUser = "";
+    selectedUserBalance = 0;
+    userSearch = "";
+    balanceRequestId += 1;
+    showCheckout = true;
+  }
+
+  function closeCheckout() {
+    if (loading) return;
+    showCheckout = false;
+    selectedUser = "";
+    selectedUserBalance = 0;
+    userSearch = "";
+    balanceRequestId += 1;
+  }
+
+  async function checkout() {
+    if (loading) return;
+
+    if (!selectedUser) {
+      alert("Pilih santri terlebih dahulu");
+      return;
+    }
+
+    if (!cart.length) {
+      alert("Keranjang kosong");
+      return;
+    }
+
+    loading = true;
+
+    try {
+      const santri = users.find(
+        (user) => String(user.id) === String(selectedUser)
+      );
+
+      if (!santri) {
+        alert("Santri tidak ditemukan");
+        return;
+      }
+
+      const saldo = await loadUserBalance(selectedUser, true);
+      if (saldo === null) {
+        alert("Gagal mengambil saldo santri");
+        return;
+      }
+
+      const productIds = cart.map((item) => item.product.id);
+
+      const { data: latestProducts, error: stockReadError } = await supabase
+        .from("products")
+        .select("id,name,price,stock,image")
+        .in("id", productIds);
+
+      if (stockReadError) {
+        alert(stockReadError.message);
+        return;
+      }
+
+      const latestById = new Map(
+        (latestProducts || []).map((product) => [
+          Number(product.id),
+          product as Product
+        ])
+      );
+
+      for (const item of cart) {
+        const latest = latestById.get(item.product.id);
+
+        if (!latest) {
+          alert(`Produk ${item.product.name} tidak ditemukan`);
+          return;
+        }
+
+        if (Number(latest.stock) < item.qty) {
+          alert(`Stock ${latest.name} tidak cukup`);
+          return;
+        }
+      }
+
+      const purchaseDate = todayDate();
+
+      const entryRows = cart.map((item) => ({
+        name: `Beli ${item.product.name} x${item.qty}`,
+        amount: Number(item.product.price) * item.qty,
+        kind: "pengeluaran" as const,
+        user_id: santri.id,
+        date: purchaseDate
+      }));
+
+      const { data: insertedEntries, error: entryError } = await supabase
+        .from("entries")
+        .insert(entryRows)
+        .select("id");
+
+      if (entryError) {
+        alert(entryError.message);
+        return;
+      }
+
+      const insertedIds = (insertedEntries || [])
+        .map((entry) => entry.id)
+        .filter(Boolean);
+
+      const stockResults = await Promise.all(
+        cart.map(async (item) => {
+          const latest = latestById.get(item.product.id);
+          if (!latest) return { ok: false, message: "Produk tidak ditemukan" };
+
+          const newStock = Number(latest.stock) - item.qty;
+
+          const { data: updated, error } = await supabase
+            .from("products")
+            .update({ stock: newStock })
+            .eq("id", item.product.id)
+            .eq("stock", Number(latest.stock))
+            .select("id,stock")
+            .maybeSingle();
+
+          if (error) {
+            return {
+              ok: false,
+              message: `Gagal mengubah stock ${latest.name}: ${error.message}`
+            };
+          }
+
+          if (!updated) {
+            return {
+              ok: false,
+              message: `Stock ${latest.name} baru saja berubah. Silakan coba lagi.`
+            };
+          }
+
+          return {
+            ok: true,
+            productId: item.product.id,
+            previousStock: Number(latest.stock)
+          };
+        })
+      );
+
+      const failed = stockResults.find((result) => !result.ok);
+
+      if (failed) {
+        if (insertedIds.length) {
+          await supabase.from("entries").delete().in("id", insertedIds);
+        }
+
+        for (const result of stockResults) {
+          if (
+            result.ok &&
+            result.productId !== undefined &&
+            result.previousStock !== undefined
+          ) {
+            const qty =
+              cart.find((item) => item.product.id === result.productId)?.qty || 0;
+
+            await supabase
+              .from("products")
+              .update({ stock: result.previousStock })
+              .eq("id", result.productId)
+              .eq("stock", result.previousStock - qty);
+          }
+        }
+
+        alert(failed.message);
+        await loadProducts();
+        return;
+      }
+
+      balanceCache = new Map(balanceCache).set(
+        selectedUser,
+        saldo - cartTotal
+      );
+
+      cart = [];
+      selectedUser = "";
+      selectedUserBalance = 0;
+      showCheckout = false;
+      showCart = false;
+
+      await Promise.all([
+        loadProducts(),
+        loadHistory(),
+        loadFinanceEntries()
+      ]);
+
+      activeSection = "history";
+      alert(`Pembayaran berhasil untuk ${santri.username}`);
+    } catch (error) {
+      console.error(error);
+      alert("Terjadi kesalahan saat checkout");
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function loadHistory() {
+    historyLoading = true;
+
+    try {
+      const { data, error } = await supabase
+        .from("entries")
+        .select("id,name,amount,user_id,date")
+        .eq("kind", "pengeluaran")
+        .ilike("name", "Beli %")
+        .order("date", { ascending: false })
+        .order("id", { ascending: false });
+
+      if (error) {
+        history = [];
+        return;
+      }
+
+      const userMap = new Map(
+        users.map((user) => [String(user.id), user.username])
+      );
+
+      history = (data || []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        amount: Number(item.amount),
+        user_id: item.user_id,
+        date: item.date,
+        username: userMap.get(String(item.user_id)) || "Santri"
+      }));
+    } finally {
+      historyLoading = false;
+    }
+  }
+
+  async function loadFinanceEntries() {
+    financeLoading = true;
+
+    try {
+      const { data, error } = await supabase
+        .from("entries")
+        .select("id,name,amount,kind,user_id,date")
+        .order("date", { ascending: false })
+        .order("id", { ascending: false });
+
+      if (error) {
+        financeEntries = [];
+        console.error(error.message);
+        return;
+      }
+
+      financeEntries = (data || []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        amount: Number(item.amount) || 0,
+        kind: item.kind,
+        user_id: item.user_id,
+        date: item.date
+      })) as Entry[];
+    } finally {
+      financeLoading = false;
+    }
+  }
+
+  function csvCell(value: string | number) {
+    return `"${String(value).replace(/"/g, '""')}"`;
+  }
+
+  function exportFinanceCSV() {
+    const rows = [
+      ["Tanggal", "Jenis", "Keterangan", "Jumlah"],
+      ...filteredFinanceEntries.map((entry) => [
+        entry.date,
+        isSaleEntry(entry)
+          ? "Pemasukan / Penjualan"
+          : entry.kind === "pemasukan"
+            ? "Pemasukan"
+            : "Pengeluaran",
+        entry.name,
+        entry.amount
+      ]),
+      [],
+      ["", "", "Total Penjualan", financeSales],
+      ["", "", "Pemasukan Lain", financeIncome],
+      ["", "", "Total Pengeluaran", financeExpenses],
+      ["", "", financeNet >= 0 ? "Untung Bersih" : "Rugi Bersih", financeNet]
+    ];
+
+    const csv = rows
+      .map((row) => row.map((value) => csvCell(value ?? "")).join(","))
+      .join("\n");
+
+    const blob = new Blob(["\ufeff" + csv], {
+      type: "text/csv;charset=utf-8;"
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `rekap-keuangan-${financeDate || "semua-tanggal"}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   function openAddProduct() {
     editingProductId = null;
-
-    productForm = {
-      name: "",
-      price: "",
-      stock: "",
-      image: ""
-    };
-
+    productForm = { name: "", price: "", stock: "", image: "" };
     showProductModal = true;
   }
 
   function openEditProduct(product: Product) {
     editingProductId = product.id;
-
     productForm = {
       name: product.name,
       price: String(product.price),
       stock: String(product.stock),
       image: product.image || ""
     };
-
     showProductModal = true;
   }
 
   function closeProductModal() {
     if (productLoading) return;
-
     showProductModal = false;
     editingProductId = null;
   }
@@ -398,25 +735,18 @@
     const stock = Number(productForm.stock);
     const image = productForm.image.trim();
 
-    if (!name) {
-      alert("Nama produk wajib diisi");
-      return;
-    }
-
+    if (!name) return alert("Nama produk wajib diisi");
     if (!Number.isInteger(price) || price < 0) {
-      alert("Harga harus berupa angka bulat 0 atau lebih");
-      return;
+      return alert("Harga harus berupa angka bulat 0 atau lebih");
     }
-
     if (!Number.isInteger(stock) || stock < 0) {
-      alert("Stock harus berupa angka bulat 0 atau lebih");
-      return;
+      return alert("Stock harus berupa angka bulat 0 atau lebih");
     }
 
     productLoading = true;
 
     try {
-      const productData = {
+      const payload = {
         name,
         price,
         stock,
@@ -424,28 +754,15 @@
       };
 
       if (editingProductId === null) {
-        const { error } = await supabase
-          .from("products")
-          .insert([productData]);
-
-        if (error) {
-          alert(error.message);
-          return;
-        }
-
-        alert("Produk berhasil ditambahkan");
+        const { error } = await supabase.from("products").insert([payload]);
+        if (error) return alert(error.message);
       } else {
         const { error } = await supabase
           .from("products")
-          .update(productData)
+          .update(payload)
           .eq("id", editingProductId);
 
-        if (error) {
-          alert(error.message);
-          return;
-        }
-
-        alert("Produk berhasil diperbarui");
+        if (error) return alert(error.message);
       }
 
       showProductModal = false;
@@ -472,2694 +789,1419 @@
         .delete()
         .eq("id", deletingProduct.id);
 
-      if (error) {
-        alert(error.message);
-        return;
-      }
+      if (error) return alert(error.message);
 
-      cart = cart.filter(
-        (item) => item.product.id !== deletingProduct?.id
-      );
-
+      cart = cart.filter((item) => item.product.id !== deletingProduct?.id);
       showDeleteModal = false;
       deletingProduct = null;
-
       await loadProducts();
-
-      alert("Produk berhasil dihapus");
     } finally {
       productLoading = false;
     }
   }
 
-  // =========================
-  // CART
-  // =========================
-  function addToCart(product: Product) {
-    if (Number(product.stock) <= 0) {
-      alert("Stock habis");
-      return;
-    }
-
-    const existing = cart.find(
-      (item) => item.product.id === product.id
-    );
-
-    if (existing) {
-      if (existing.qty >= Number(product.stock)) {
-        alert("Stock tidak cukup");
-        return;
-      }
-
-      cart = cart.map((item) =>
-        item.product.id === product.id
-          ? { ...item, qty: item.qty + 1 }
-          : item
-      );
-      return;
-    }
-
-    cart = [
-      ...cart,
-      {
-        product,
-        qty: 1
-      }
-    ];
+  function logout() {
+    localStorage.removeItem("user");
+    goto("/login");
   }
 
-  function increaseCart(productId: number) {
-    const item = cart.find(
-      (cartItem) => cartItem.product.id === productId
-    );
+  onMount(async () => {
+    updateCurrentDate();
+    const timer = window.setInterval(updateCurrentDate, 30000);
 
-    const latestProduct = products.find(
-      (product) => product.id === productId
-    );
+    const storedUser = localStorage.getItem("user");
 
-    if (!item || !latestProduct) return;
-
-    if (item.qty >= Number(latestProduct.stock)) {
-      alert("Stock tidak cukup");
+    if (!storedUser) {
+      goto("/login");
       return;
     }
-
-    cart = cart.map((cartItem) =>
-      cartItem.product.id === productId
-        ? { ...cartItem, qty: cartItem.qty + 1 }
-        : cartItem
-    );
-  }
-
-  function decreaseCart(productId: number) {
-    const item = cart.find(
-      (cartItem) => cartItem.product.id === productId
-    );
-
-    if (!item) return;
-
-    if (item.qty <= 1) {
-      removeFromCart(productId);
-      return;
-    }
-
-    cart = cart.map((cartItem) =>
-      cartItem.product.id === productId
-        ? { ...cartItem, qty: cartItem.qty - 1 }
-        : cartItem
-    );
-  }
-
-  function removeFromCart(productId: number) {
-    cart = cart.filter(
-      (item) => item.product.id !== productId
-    );
-  }
-
-  $: cartTotal = cart.reduce(
-    (total, item) =>
-      total + Number(item.product.price) * item.qty,
-    0
-  );
-
-  // =========================
-  // CHECKOUT
-  // =========================
-  async function checkout() {
-    if (loading) return;
-
-    if (!selectedUser) {
-      alert("Pilih santri");
-      return;
-    }
-
-    if (cart.length === 0) {
-      alert("Keranjang kosong");
-      return;
-    }
-
-    loading = true;
 
     try {
-      const santri = users.find(
-        (user) => String(user.id) === String(selectedUser)
-      );
-
-      if (!santri) {
-        alert("Santri tidak ditemukan");
-        return;
-      }
-
-      // Selalu refresh saldo saat pembayaran agar tidak memakai cache lama.
-      const saldo = await loadUserBalance(selectedUser, true);
-
-      if (saldo === null) {
-        alert("Gagal mengambil saldo santri");
-        return;
-      }
-
-      const total = cartTotal;
-
-      // Saldo tidak lagi menjadi penghalang checkout.
-      // Jika saldo kurang dari total belanja, selisihnya otomatis menjadi utang.
-      // Contoh: saldo Rp10.000 dan belanja Rp15.000 -> saldo akhir -Rp5.000.
-
-      // Ambil semua stock terbaru sekaligus, bukan satu-per-satu.
-      const productIds = cart.map((item) => item.product.id);
-
-      const { data: latestProducts, error: productsError } =
-        await supabase
-          .from("products")
-          .select("id,name,price,stock,image")
-          .in("id", productIds);
-
-      if (productsError) {
-        alert(productsError.message);
-        return;
-      }
-
-      const latestById = new Map(
-        (latestProducts || []).map((product) => [
-          Number(product.id),
-          product
-        ])
-      );
-
-      for (const item of cart) {
-        const latestProduct = latestById.get(item.product.id);
-
-        if (!latestProduct) {
-          alert(`Produk ${item.product.name} tidak ditemukan`);
-          return;
-        }
-
-        if (Number(latestProduct.stock) < item.qty) {
-          alert(`Stock ${latestProduct.name} tidak cukup`);
-          return;
-        }
-      }
-
-      const purchaseDate = todayDate();
-
-      // Insert semua transaksi sekaligus supaya request database jauh lebih sedikit.
-      const entryRows = cart.map((item) => ({
-        name: `Beli ${item.product.name} x${item.qty}`,
-        amount: Number(item.product.price) * item.qty,
-        kind: "pengeluaran" as const,
-        user_id: santri.id,
-        date: purchaseDate
-      }));
-
-      // Simpan transaksi dan minta kembali ID-nya.
-      // ID ini dipakai untuk kompensasi jika update stock gagal.
-      const { data: insertedEntries, error: entryError } =
-        await supabase
-          .from("entries")
-          .insert(entryRows)
-          .select("id");
-
-      if (entryError) {
-        alert(entryError.message);
-        return;
-      }
-
-      const insertedEntryIds = (insertedEntries || [])
-        .map((entry) => entry.id)
-        .filter(Boolean);
-
-      // Update stock berdasarkan stock terbaru dari database, bukan stock lama di cart.
-      // eq("stock", ...) mencegah stock lama menimpa perubahan transaksi lain.
-      const stockResults = await Promise.all(
-        cart.map(async (item) => {
-          const latestProduct = latestById.get(item.product.id);
-
-          if (!latestProduct) {
-            return {
-              ok: false,
-              message: `Produk ${item.product.name} tidak ditemukan`
-            };
-          }
-
-          const newStock =
-            Number(latestProduct.stock) - item.qty;
-
-          const { data: updatedProduct, error } = await supabase
-            .from("products")
-            .update({ stock: newStock })
-            .eq("id", item.product.id)
-            .eq("stock", Number(latestProduct.stock))
-            .select("id,stock")
-            .maybeSingle();
-
-          if (error) {
-            return {
-              ok: false,
-              message: `Gagal mengubah stock ${latestProduct.name}: ${error.message}`
-            };
-          }
-
-          if (!updatedProduct) {
-            return {
-              ok: false,
-              message: `Stock ${latestProduct.name} baru saja berubah. Silakan coba checkout lagi.`
-            };
-          }
-
-          return {
-            ok: true,
-            message: "",
-            productId: item.product.id,
-            previousStock: Number(latestProduct.stock)
-          };
-        })
-      );
-
-      const failedStock = stockResults.find((result) => !result.ok);
-
-      if (failedStock) {
-        // Coba batalkan entry yang baru dibuat agar saldo tidak terpotong
-        // jika salah satu update stock gagal.
-        if (insertedEntryIds.length > 0) {
-          const { error: rollbackError } = await supabase
-            .from("entries")
-            .delete()
-            .in("id", insertedEntryIds);
-
-          if (rollbackError) {
-            console.error(
-              "Rollback transaksi gagal:",
-              rollbackError
-            );
-          }
-        }
-
-        // Kembalikan stock yang sudah berhasil dikurangi.
-        const successfulStocks = stockResults.filter(
-          (result) => result.ok
-        );
-
-        await Promise.all(
-          successfulStocks.map(async (result) => {
-            if (
-              !result.ok ||
-              result.productId === undefined ||
-              result.previousStock === undefined
-            ) {
-              return;
-            }
-
-            await supabase
-              .from("products")
-              .update({ stock: result.previousStock })
-              .eq("id", result.productId)
-              .eq(
-                "stock",
-                result.previousStock - (
-                  cart.find(
-                    (item) => item.product.id === result.productId
-                  )?.qty || 0
-                )
-              );
-          })
-        );
-
-        alert(failedStock.message);
-        await loadProducts();
-        return;
-      }
-
-      // Cache saldo diperbarui langsung.
-      // Nilai negatif disimpan apa adanya agar utang santri tetap tercatat.
-      const newBalance = saldo - total;
-      balanceCache = new Map(balanceCache).set(
-        selectedUser,
-        newBalance
-      );
-
-      cart = [];
-      selectedUser = "";
-      selectedUserBalance = 0;
-      userSearch = "";
-      balanceLoading = false;
-      showCheckout = false;
-      showCart = false;
-
-      await Promise.all([
-        loadProducts(),
-        loadHistory()
-      ]);
-
-      activeSection = "history";
-
-      alert(`Pembayaran berhasil untuk ${santri.username}`);
-    } catch (error) {
-      console.error(error);
-      alert("Terjadi kesalahan saat checkout");
-    } finally {
-      loading = false;
-    }
-  }
-
-  // =========================
-  // HISTORY
-  // =========================
-  async function loadHistory() {
-    historyLoading = true;
-
-    try {
-      const { data, error } = await supabase
-        .from("entries")
-        .select("id,name,amount,user_id,date")
-        .eq("kind", "pengeluaran")
-        .ilike("name", "Beli %")
-        .order("date", { ascending: false })
-        .order("id", { ascending: false });
-
-      if (error) {
-        console.log(error.message);
-        history = [];
-        return;
-      }
-
-      const userMap = new Map(
-        users.map((user) => [String(user.id), user.username])
-      );
-
-      history = (data || []).map((item) => ({
-        id: item.id,
-        name: item.name,
-        amount: Number(item.amount),
-        user_id: item.user_id,
-        date: item.date,
-        username:
-          userMap.get(String(item.user_id)) || "Santri"
-      }));
-    } finally {
-      historyLoading = false;
-    }
-  }
-
-  $: availableProducts = products.filter(
-    (product) => Number(product.stock) > 0
-  );
-
-  $: productKeyword = productSearch.toLowerCase().trim();
-
-  $: filteredProducts = productKeyword
-    ? availableProducts.filter((product) =>
-        product.name.toLowerCase().includes(productKeyword)
-      )
-    : availableProducts;
-
-  $: userKeyword = userSearch.toLowerCase().trim();
-
-  $: filteredUsers = userKeyword
-    ? users.filter((user) =>
-        user.username.toLowerCase().includes(userKeyword) ||
-        user.email.toLowerCase().includes(userKeyword)
-      )
-    : users;
-
-  $: selectedUserData =
-    users.find((user) => user.id === selectedUser) || null;
-
-  $: filteredHistory = historyDate
-    ? history.filter((item) => item.date === historyDate)
-    : history;
-
-  $: groupedHistory = (() => {
-    const groups: Record<string, PurchaseHistory[]> = {};
-
-    for (const item of filteredHistory) {
-      if (!groups[item.date]) {
-        groups[item.date] = [];
-      }
-
-      groups[item.date].push(item);
+      currentUser = JSON.parse(storedUser);
+    } catch {
+      localStorage.removeItem("user");
+      goto("/login");
+      return;
     }
 
-    return Object.entries(groups).sort(
-      ([a], [b]) => b.localeCompare(a)
-    );
-  })();
+    if (currentUser?.role !== "admin") {
+      alert("Akses ditolak");
+      goto("/");
+      return;
+    }
 
-  function historyTotal(items: PurchaseHistory[]) {
-    return items.reduce(
-      (total, item) => total + Number(item.amount),
-      0
-    );
-  }
+    await Promise.all([
+      loadProducts(),
+      loadUsers(),
+      loadHistory(),
+      loadFinanceEntries()
+    ]);
+
+    return () => window.clearInterval(timer);
+  });
 </script>
 
-<div class="app">
+<svelte:head>
+  <title>Market Santri</title>
+  <meta name="description" content="Market Santri - Belanja kebutuhan harian santri" />
+</svelte:head>
 
-  <!-- =========================
-       TOP HEADER
-  ========================== -->
-  <header class="topbar">
+<div class="app-shell">
+  <!-- Burger SELALU di kiri -->
+  <button
+    class="burger-button"
+    class:active={sidebarOpen}
+    type="button"
+    aria-label={sidebarOpen ? "Tutup menu" : "Buka menu"}
+    aria-expanded={sidebarOpen}
+    on:click={toggleSidebar}
+  >
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
 
-    <div class="brand" on:click={() => changeSection("market")}>
-      <div class="brand-icon">🛒</div>
+  {#if sidebarOpen}
+    <button
+      class="sidebar-backdrop"
+      type="button"
+      aria-label="Tutup menu"
+      on:click={closeSidebar}
+    ></button>
+  {/if}
 
+  <aside class="sidebar" class:open={sidebarOpen}>
+    <div class="brand">
+      <img src="logo.png" alt="Market Santri" />
       <div>
         <strong>Market Santri</strong>
-        <small>Admin: {currentUser?.username}</small>
+        <small>Belanja santri</small>
       </div>
     </div>
 
-    <button
-      class="dashboard-btn"
-      on:click={() => goto("/dashboard")}
-    >
-      ⬅ Dashboard
-    </button>
+    <nav class="nav-menu">
+      <button class:active={activeSection === "market"} on:click={() => changeSection("market")}>
+        <span class="nav-icon">🛒</span>
+        <span>Belanja</span>
+      </button>
 
-  </header>
+      <button class:active={activeSection === "products"} on:click={() => changeSection("products")}>
+        <span class="nav-icon">📦</span>
+        <span>Produk</span>
+      </button>
 
-  <!-- =========================
-       NAVIGATION BUTTONS
-  ========================== -->
-  <nav class="section-nav">
+      <button class:active={activeSection === "history"} on:click={() => changeSection("history")}>
+        <span class="nav-icon">↺</span>
+        <span>History</span>
+      </button>
 
-    <button
-      class:active={activeSection === "market"}
-      on:click={() => changeSection("market")}
-    >
-      🛍️
-      <span>Belanja</span>
-    </button>
+      <button class:active={activeSection === "finance"} on:click={() => changeSection("finance")}>
+        <span class="nav-icon">▣</span>
+        <span>Keuangan</span>
+      </button>
 
-    <button
-      class:active={activeSection === "products"}
-      on:click={() => changeSection("products")}
-    >
-      ⚙️
-      <span>Produk</span>
-    </button>
+      <button class="cart-nav" on:click={openCart}>
+        <span class="nav-icon">🛍</span>
+        <span>Keranjang</span>
+        {#if cartCount > 0}<b>{cartCount}</b>{/if}
+      </button>
+    </nav>
 
-    <button
-      class:active={activeSection === "history"}
-      on:click={() => changeSection("history")}
-    >
-      🧾
-      <span>History</span>
-    </button>
-
-    <button
-      class="nav-cart"
-      on:click={() => showCart = true}
-    >
-      🛒
-      <span>Keranjang</span>
-
-      {#if cart.length > 0}
-        <b>{cart.reduce((total, item) => total + item.qty, 0)}</b>
-      {/if}
-    </button>
-
-  </nav>
-
-  {#if message}
-    <div class="error">{message}</div>
-  {/if}
-
-  <main>
-
-    <!-- =========================
-         SECTION MARKET
-         HALAMAN PERTAMA
-    ========================== -->
-    {#if activeSection === "market"}
-
-      <section class="hero">
+    <div class="sidebar-bottom">
+      <div class="user-box">
+        <span class="user-avatar">A</span>
         <div>
-          <span>MARKET SANTRI</span>
-          <h1>Belanja kebutuhan santri</h1>
+          <strong>{currentUser?.username || "Admin"}</strong>
+          <small>Administrator</small>
+        </div>
+      </div>
+
+      <button class="logout-button" on:click={logout}>↪ Keluar</button>
+    </div>
+  </aside>
+
+  <main class="main-content">
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="mobile-brand">Market Santri</span>
+        <span class="date-label">📅 {formatDate(currentDate)}</span>
+      </div>
+      <div class="online-pill"><span></span> Online</div>
+    </header>
+
+    {#if message}
+      <div class="alert-message">{message}</div>
+    {/if}
+
+    {#if activeSection === "market"}
+      <section class="page">
+        <div class="hero">
+          <div class="hero-overlay">
+            <p class="hero-kicker">MARKET SANTRI</p>
+            <h1>Belanja kebutuhan harian santri</h1>
+            <p>Praktis, mudah, dan harga terjangkau.</p>
+          </div>
+        </div>
+
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">KATALOG</span>
+            <h2>Pilih kebutuhanmu</h2>
+          </div>
+
+          <button class="cart-top-button" on:click={openCart}>
+            🛒 Keranjang
+            {#if cartCount > 0}<span>{cartCount}</span>{/if}
+          </button>
+        </div>
+
+        <div class="toolbar">
+          <div class="category-tabs">
+            {#each ["Semua", "Jajanan", "Barang", "Tea"] as category}
+              <button
+                class:active={categoryFilter === category}
+                on:click={() => categoryFilter = category as Category}
+              >
+                {category}
+              </button>
+            {/each}
+          </div>
+
+          <label class="search-box">
+            <span>⌕</span>
+            <input bind:value={productSearch} placeholder="Cari produk..." />
+          </label>
+        </div>
+
+        {#if filteredProducts.length === 0}
+          <div class="empty-state">
+            <div>📦</div>
+            <h3>Produk tidak ditemukan</h3>
+            <p>Coba ubah kategori atau kata pencarian.</p>
+          </div>
+        {:else}
+          <div class="product-grid">
+            {#each filteredProducts as product}
+              <article class="product-card">
+                <div class="product-image-wrap">
+                  {#if product.image}
+                    <img src={product.image} alt={product.name} class="product-image" />
+                  {:else}
+                    <div class="image-placeholder">📦</div>
+                  {/if}
+                </div>
+
+                <div class="product-info">
+                  <span class="product-category">{productCategory(product)}</span>
+                  <h3>{product.name}</h3>
+                  <div class="product-price">Rp {formatRupiah(product.price)}</div>
+                  <div class="stock-text">Stock {product.stock}</div>
+
+                  <div class="quantity-row">
+                    <span>Jumlah</span>
+                    <span class="qty-preview">1</span>
+                  </div>
+
+                  <button class="primary-button full" on:click={() => addToCart(product)}>
+                    🛒 + Tambah
+                  </button>
+                </div>
+              </article>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    {#if activeSection === "products"}
+      <section class="page">
+        <div class="page-header">
+          <div>
+            <span class="eyebrow">MANAJEMEN</span>
+            <h1>Produk</h1>
+            <p>Kelola nama, harga, stock, dan gambar produk.</p>
+          </div>
+          <button class="primary-button" on:click={openAddProduct}>＋ Tambah Produk</button>
+        </div>
+
+        <div class="admin-table-card">
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Produk</th>
+                  <th>Kategori</th>
+                  <th>Harga</th>
+                  <th>Stock</th>
+                  <th>Aksi</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each products as product}
+                  <tr>
+                    <td>
+                      <div class="table-product">
+                        {#if product.image}
+                          <img src={product.image} alt={product.name} />
+                        {:else}<div class="mini-placeholder">📦</div>{/if}
+                        <strong>{product.name}</strong>
+                      </div>
+                    </td>
+                    <td><span class="category-badge">{productCategory(product)}</span></td>
+                    <td>Rp {formatRupiah(product.price)}</td>
+                    <td>{product.stock}</td>
+                    <td>
+                      <div class="action-row">
+                        <button class="small-button edit" on:click={() => openEditProduct(product)}>Edit</button>
+                        <button class="small-button danger" on:click={() => askDeleteProduct(product)}>Hapus</button>
+                      </div>
+                    </td>
+                  </tr>
+                {:else}
+                  <tr><td colspan="5" class="table-empty">Belum ada produk.</td></tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    {/if}
+
+    {#if activeSection === "history"}
+      <section class="page">
+        <div class="page-header">
+          <div>
+            <span class="eyebrow">TRANSAKSI</span>
+            <h1>History Pembelian</h1>
+            <p>Daftar pembelian yang dilakukan untuk santri.</p>
+          </div>
+          <div class="date-filter">
+            <label>Tanggal</label>
+            <input type="date" bind:value={historyDate} />
+            {#if historyDate}<button on:click={() => historyDate = ""}>Reset</button>{/if}
+          </div>
+        </div>
+
+        <div class="admin-table-card">
+          {#if historyLoading}
+            <div class="loading-state">Memuat history...</div>
+          {:else}
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Tanggal</th>
+                    <th>Santri</th>
+                    <th>Transaksi</th>
+                    <th>Jumlah</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each filteredHistory as item}
+                    <tr>
+                      <td>{formatDateShort(item.date)}</td>
+                      <td><strong>{item.username}</strong></td>
+                      <td>{item.name}</td>
+                      <td class="money">Rp {formatRupiah(item.amount)}</td>
+                    </tr>
+                  {:else}
+                    <tr><td colspan="4" class="table-empty">Belum ada transaksi.</td></tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      </section>
+    {/if}
+
+    {#if activeSection === "finance"}
+      <section class="page">
+        <div class="page-header">
+          <div>
+            <span class="eyebrow">LAPORAN</span>
+            <h1>Rekap Keuangan</h1>
+            <p>Ringkasan penjualan, pemasukan, pengeluaran, dan hasil bersih.</p>
+          </div>
+
+          <div class="finance-actions">
+            <label class="date-filter">
+              <span>Tanggal</span>
+              <input type="date" bind:value={financeDate} />
+            </label>
+            {#if financeDate}
+              <button class="secondary-button" on:click={() => financeDate = ""}>Semua Tanggal</button>
+            {/if}
+            <button class="primary-button" on:click={exportFinanceCSV}>↓ Export Rekap</button>
+          </div>
+        </div>
+
+        <div class="finance-grid">
+          <div class="finance-card blue">
+            <span>Total Penjualan</span>
+            <strong>Rp {formatRupiah(financeSales)}</strong>
+            <small>Transaksi checkout</small>
+          </div>
+          <div class="finance-card cyan">
+            <span>Pemasukan Lain</span>
+            <strong>Rp {formatRupiah(financeIncome)}</strong>
+            <small>Pemasukan tercatat</small>
+          </div>
+          <div class="finance-card orange">
+            <span>Total Pengeluaran</span>
+            <strong>Rp {formatRupiah(financeExpenses)}</strong>
+            <small>Biaya usaha tercatat</small>
+          </div>
+          <div class:loss={financeNet < 0} class="finance-card green">
+            <span>{financeNet >= 0 ? "Untung Bersih" : "Rugi Bersih"}</span>
+            <strong>Rp {formatRupiah(Math.abs(financeNet))}</strong>
+            <small>Penjualan + pemasukan − pengeluaran</small>
+          </div>
+        </div>
+
+        <div class="note-box">
+          <strong>Catatan pembukuan</strong>
           <p>
-            Pilih barang yang tersedia dan masukkan
-            ke keranjang untuk dibeli.
+            Checkout <b>Beli ...</b> dihitung sebagai penjualan. Karena tabel produk belum
+            menyimpan harga modal/HPP, angka untung/rugi di sini adalah hasil bersih dari
+            penjualan dan pengeluaran yang tercatat, bukan laba kotor berdasarkan HPP.
           </p>
         </div>
 
-        <div class="hero-stat">
-          <strong>{availableProducts.length}</strong>
-          <small>Barang tersedia</small>
-        </div>
-      </section>
-
-      <section class="market-section">
-
-        <div class="section-head market-head">
-          <div>
-            <h2>Barang yang Bisa Dibeli</h2>
-            <p>Hanya produk dengan stock tersedia yang ditampilkan.</p>
+        <div class="admin-table-card">
+          <div class="card-heading">
+            <div>
+              <h3>Detail Transaksi</h3>
+              <span>{filteredFinanceEntries.length} transaksi</span>
+            </div>
+            <button class="icon-button" on:click={() => loadFinanceEntries()} aria-label="Refresh">↻</button>
           </div>
 
-          {#if availableProducts.length > 0}
-            <div class="search-box product-search">
-              <span>🔎</span>
-              <input
-                type="search"
-                bind:value={productSearch}
-                placeholder="Cari barang..."
-                aria-label="Cari barang"
-              />
-              {#if productSearch}
-                <button
-                  type="button"
-                  class="clear-search"
-                  aria-label="Hapus pencarian barang"
-                  on:click={() => productSearch = ""}
-                >
-                  ✕
-                </button>
-              {/if}
+          {#if financeLoading}
+            <div class="loading-state">Memuat rekap keuangan...</div>
+          {:else}
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Tanggal</th>
+                    <th>Jenis</th>
+                    <th>Keterangan</th>
+                    <th>Jumlah</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each filteredFinanceEntries as entry}
+                    <tr>
+                      <td>{formatDateShort(entry.date)}</td>
+                      <td>
+                        <span class:income={isSaleEntry(entry) || entry.kind === "pemasukan"} class="type-badge">
+                          {isSaleEntry(entry) || entry.kind === "pemasukan" ? "Pemasukan" : "Pengeluaran"}
+                        </span>
+                      </td>
+                      <td>{entry.name}</td>
+                      <td class:positive={isSaleEntry(entry) || entry.kind === "pemasukan"} class="money">
+                        {isSaleEntry(entry) || entry.kind === "pemasukan" ? "+" : "-"} Rp {formatRupiah(entry.amount)}
+                      </td>
+                    </tr>
+                  {:else}
+                    <tr><td colspan="4" class="table-empty">Belum ada transaksi keuangan.</td></tr>
+                  {/each}
+                </tbody>
+              </table>
             </div>
           {/if}
         </div>
-
-        {#if availableProducts.length === 0}
-
-          <div class="empty">
-            <div>📦</div>
-            <h3>Belum ada barang tersedia</h3>
-            <p>
-              Semua barang sedang habis atau belum ditambahkan.
-            </p>
-
-            <button
-              on:click={() => changeSection("products")}
-            >
-              ⚙️ Kelola Produk
-            </button>
-          </div>
-
-        {:else if filteredProducts.length === 0}
-
-          <div class="empty search-empty">
-            <div>🔎</div>
-            <h3>Barang tidak ditemukan</h3>
-            <p>Tidak ada barang yang cocok dengan "{productSearch}".</p>
-            <button
-              type="button"
-              on:click={() => productSearch = ""}
-            >
-              Tampilkan Semua Barang
-            </button>
-          </div>
-
-        {:else}
-
-          <div class="shop-grid">
-
-            {#each filteredProducts as product}
-
-              <article class="shop-card">
-
-                <div class="shop-image">
-                  <img
-                    src={
-                      product.image ||
-                      "https://via.placeholder.com/600x400?text=Produk"
-                    }
-                    alt={product.name}
-                  />
-
-                  <span>
-                    Stock {product.stock}
-                  </span>
-                </div>
-
-                <div class="shop-body">
-
-                  <h3>{product.name}</h3>
-
-                  <strong class="shop-price">
-                    Rp {formatRupiah(product.price)}
-                  </strong>
-
-                  <button
-                    on:click={() => addToCart(product)}
-                  >
-                    ＋ Tambah ke Keranjang
-                  </button>
-
-                </div>
-
-              </article>
-
-            {/each}
-
-          </div>
-
-        {/if}
-
       </section>
-
     {/if}
-
-    <!-- =========================
-         SECTION PRODUCTS
-    ========================== -->
-    {#if activeSection === "products"}
-
-      <section class="page-section">
-
-        <div class="page-title">
-
-          <div>
-            <span>MANAGEMENT</span>
-            <h1>Kelola Produk</h1>
-            <p>
-              Tambah, edit, hapus, dan atur stock barang market.
-            </p>
-          </div>
-
-          <button
-            class="primary-btn"
-            on:click={openAddProduct}
-          >
-            ＋ Tambah Produk
-          </button>
-
-        </div>
-
-        <div class="admin-product-grid">
-
-          {#each products as product}
-
-            <article class="admin-product">
-
-              <div class="admin-image">
-
-                <img
-                  src={
-                    product.image ||
-                    "https://via.placeholder.com/600x400?text=Produk"
-                  }
-                  alt={product.name}
-                />
-
-                {#if product.stock <= 0}
-                  <span class="sold-out">HABIS</span>
-                {/if}
-
-              </div>
-
-              <div class="admin-product-body">
-
-                <h3>{product.name}</h3>
-
-                <p>
-                  Rp {formatRupiah(product.price)}
-                </p>
-
-                <div class="admin-stock">
-                  <span>Stock</span>
-                  <strong>{product.stock}</strong>
-                </div>
-
-                <div class="admin-actions">
-
-                  <button
-                    class="edit-btn"
-                    on:click={() => openEditProduct(product)}
-                  >
-                    ✏️ Edit
-                  </button>
-
-                  <button
-                    class="delete-btn"
-                    on:click={() => askDeleteProduct(product)}
-                  >
-                    🗑️ Hapus
-                  </button>
-
-                </div>
-
-              </div>
-
-            </article>
-
-          {:else}
-
-            <div class="empty">
-              <div>📦</div>
-              <h3>Belum ada produk</h3>
-              <p>Tambahkan produk pertama.</p>
-
-              <button on:click={openAddProduct}>
-                ＋ Tambah Produk
-              </button>
-            </div>
-
-          {/each}
-
-        </div>
-
-      </section>
-
-    {/if}
-
-    <!-- =========================
-         SECTION HISTORY
-    ========================== -->
-    {#if activeSection === "history"}
-
-      <section class="page-section">
-
-        <div class="page-title">
-
-          <div>
-            <span>TRANSAKSI</span>
-            <h1>History Pembelian</h1>
-            <p>
-              Riwayat pembelian hari ini dan tanggal sebelumnya.
-            </p>
-          </div>
-
-          <div class="date-filter">
-
-            <label>
-              Tanggal
-              <input
-                type="date"
-                bind:value={historyDate}
-              />
-            </label>
-
-            {#if historyDate}
-              <button on:click={() => historyDate = ""}>
-                Semua
-              </button>
-            {/if}
-
-          </div>
-
-        </div>
-
-        {#if historyLoading}
-
-          <div class="empty">
-            <div>⏳</div>
-            <h3>Memuat history...</h3>
-          </div>
-
-        {:else if groupedHistory.length === 0}
-
-          <div class="empty">
-            <div>🧾</div>
-            <h3>Belum ada pembelian</h3>
-            <p>
-              Belum ada transaksi pembelian
-              {historyDate ? ` pada ${formatDate(historyDate)}` : ""}.
-            </p>
-          </div>
-
-        {:else}
-
-          <div class="history-groups">
-
-            {#each groupedHistory as [date, items]}
-
-              <section class="history-day">
-
-                <div class="history-day-head">
-
-                  <div>
-                    <span class="history-icon">
-                      {date === currentDate ? "📅" : "🗓️"}
-                    </span>
-
-                    <div>
-                      <strong>
-                        {date === todayDate()
-                          ? "Hari Ini"
-                          : formatDate(date)}
-                      </strong>
-
-                      <small>
-                        {formatDateShort(date)}
-                      </small>
-                    </div>
-                  </div>
-
-                  <div>
-                    <small>Total</small>
-                    <strong>
-                      Rp {formatRupiah(historyTotal(items))}
-                    </strong>
-                  </div>
-
-                </div>
-
-                <div class="history-list">
-
-                  {#each items as item}
-
-                    <div class="history-item">
-
-                      <div class="history-bag">🛍️</div>
-
-                      <div class="history-info">
-                        <strong>{item.name}</strong>
-
-                        <span>
-                          Santri: {item.username || "Santri"}
-                        </span>
-
-                        <small>
-                          {item.date}
-                        </small>
-                      </div>
-
-                      <strong class="history-price">
-                        - Rp {formatRupiah(item.amount)}
-                      </strong>
-
-                    </div>
-
-                  {/each}
-
-                </div>
-
-              </section>
-
-            {/each}
-
-          </div>
-
-        {/if}
-
-      </section>
-
-    {/if}
-
   </main>
 
-  <!-- =========================
-       FLOATING CART
-  ========================== -->
   <button
     class="floating-cart"
-    on:click={() => showCart = true}
+    class:has-items={cartCount > 0}
+    type="button"
+    aria-label="Buka keranjang"
+    on:click={openCart}
   >
-    🛒
-
-    {#if cart.length > 0}
-      <span>
-        {cart.reduce((total, item) => total + item.qty, 0)}
-      </span>
+    <span class="floating-cart-icon">🛒</span>
+    {#if cartCount > 0}
+      <span class="floating-cart-count">{cartCount}</span>
     {/if}
   </button>
 
-  <!-- =========================
-       CART DRAWER
-  ========================== -->
   {#if showCart}
-
-    <div
-      class="drawer-backdrop"
-      on:click={() => showCart = false}
-    ></div>
-
-    <aside class="cart-drawer">
-
-      <div class="drawer-head">
-
-        <div>
-          <span>MARKET</span>
-          <h2>Keranjang</h2>
-        </div>
-
-        <button
-          on:click={() => showCart = false}
-        >
-          ✕
-        </button>
-
-      </div>
-
-      {#if cart.length === 0}
-
-        <div class="cart-empty">
-          <div>🛒</div>
-          <h3>Keranjang kosong</h3>
-          <p>Tambahkan barang dari halaman Belanja.</p>
-        </div>
-
-      {:else}
-
-        <div class="cart-list">
-
-          {#each cart as item}
-
-            <div class="cart-item">
-
-              <img
-                src={
-                  item.product.image ||
-                  "https://via.placeholder.com/100?text=Produk"
-                }
-                alt={item.product.name}
-              />
-
-              <div class="cart-info">
-
-                <strong>{item.product.name}</strong>
-
-                <span>
-                  Rp {formatRupiah(item.product.price)}
-                </span>
-
-                <div class="quantity">
-
-                  <button
-                    on:click={() =>
-                      decreaseCart(item.product.id)}
-                  >
-                    −
-                  </button>
-
-                  <b>{item.qty}</b>
-
-                  <button
-                    on:click={() =>
-                      increaseCart(item.product.id)}
-                  >
-                    ＋
-                  </button>
-
-                  <button
-                    class="remove"
-                    on:click={() =>
-                      removeFromCart(item.product.id)}
-                  >
-                    🗑️
-                  </button>
-
-                </div>
-
-              </div>
-
-            </div>
-
-          {/each}
-
-        </div>
-
-        <div class="cart-total">
-          <span>Total</span>
-          <strong>
-            Rp {formatRupiah(cartTotal)}
-          </strong>
-        </div>
-
-        <button
-          class="checkout-btn"
-          on:click={openCheckout}
-        >
-          💳 Checkout
-        </button>
-
-      {/if}
-
-    </aside>
-
-  {/if}
-
-  <!-- =========================
-       PRODUCT MODAL
-  ========================== -->
-  {#if showProductModal}
-
-    <div class="modal">
-
-      <div class="modal-card">
-
-        <div class="modal-head">
-
+    <div class="modal-layer" role="presentation" on:click={(event) => event.target === event.currentTarget && closeCart()}>
+      <div class="cart-drawer" role="dialog" aria-modal="true">
+        <div class="drawer-header">
           <div>
-            <span>
-              {editingProductId === null
-                ? "PRODUK BARU"
-                : "EDIT PRODUK"}
-            </span>
-
-            <h2>
-              {editingProductId === null
-                ? "Tambah Produk"
-                : "Edit Produk"}
-            </h2>
+            <span class="eyebrow">BELANJA</span>
+            <h2>Keranjang</h2>
           </div>
-
-          <button on:click={closeProductModal}>
-            ✕
-          </button>
-
+          <button class="close-button" on:click={closeCart}>×</button>
         </div>
 
-        <div class="form">
-
-          <label>
-            Nama Produk
-            <input
-              type="text"
-              bind:value={productForm.name}
-              placeholder="Nama produk"
-            />
-          </label>
-
-          <label>
-            Harga
-            <input
-              type="number"
-              min="0"
-              step="1"
-              bind:value={productForm.price}
-              placeholder="5000"
-            />
-          </label>
-
-          <label>
-            Stock
-            <input
-              type="number"
-              min="0"
-              step="1"
-              bind:value={productForm.stock}
-              placeholder="10"
-            />
-          </label>
-
-          <label>
-            URL Gambar
-            <input
-              type="url"
-              bind:value={productForm.image}
-              placeholder="https://..."
-            />
-          </label>
-
-        </div>
-
-        {#if productForm.image}
-          <img
-            class="modal-preview"
-            src={productForm.image}
-            alt="Preview"
-          />
-        {/if}
-
-        <div class="modal-actions">
-
-          <button
-            class="secondary-btn"
-            on:click={closeProductModal}
-          >
-            Batal
-          </button>
-
-          <button
-            class="primary-btn"
-            disabled={productLoading}
-            on:click={saveProduct}
-          >
-            {productLoading
-              ? "Menyimpan..."
-              : "💾 Simpan"}
-          </button>
-
-        </div>
-
-      </div>
-
-    </div>
-
-  {/if}
-
-  <!-- =========================
-       DELETE MODAL
-  ========================== -->
-  {#if showDeleteModal && deletingProduct}
-
-    <div class="modal">
-
-      <div class="delete-card">
-
-        <div class="delete-big">🗑️</div>
-
-        <h2>Hapus Produk?</h2>
-
-        <p>
-          Produk
-          <strong>{deletingProduct.name}</strong>
-          akan dihapus.
-        </p>
-
-        <div class="modal-actions">
-
-          <button
-            class="secondary-btn"
-            on:click={() => {
-              showDeleteModal = false;
-              deletingProduct = null;
-            }}
-          >
-            Batal
-          </button>
-
-          <button
-            class="delete-btn"
-            disabled={productLoading}
-            on:click={deleteProduct}
-          >
-            {productLoading ? "Menghapus..." : "Hapus"}
-          </button>
-
-        </div>
-
-      </div>
-
-    </div>
-
-  {/if}
-
-  <!-- =========================
-       CHECKOUT MODAL
-  ========================== -->
-  {#if showCheckout}
-
-    <div class="modal">
-
-      <div class="modal-card checkout-card">
-
-        <div class="modal-head">
-
-          <div>
-            <span>CHECKOUT</span>
-            <h2>Pilih Santri</h2>
+        {#if cart.length === 0}
+          <div class="drawer-empty">
+            <div>🛒</div>
+            <h3>Keranjang kosong</h3>
+            <p>Tambahkan produk dari halaman belanja.</p>
           </div>
-
-          <button
-            disabled={loading}
-            on:click={closeCheckout}
-          >
-            ✕
-          </button>
-
-        </div>
-
-        <div class="select-label">
-          <label for="santri-search">Santri</label>
-
-          <div class="search-box">
-            <span>🔎</span>
-            <input
-              id="santri-search"
-              type="search"
-              bind:value={userSearch}
-              placeholder="Cari nama atau email santri..."
-              autocomplete="off"
-              aria-label="Cari santri"
-            />
-            {#if userSearch}
-              <button
-                type="button"
-                class="clear-search"
-                aria-label="Hapus pencarian santri"
-                on:click={() => userSearch = ""}
-              >
-                ✕
-              </button>
-            {/if}
-          </div>
-
-          <div class="selected-user-label">
-            {#if selectedUserData}
-              <span>Santri terpilih:</span>
-              <strong>{selectedUserData.username}</strong>
-            {:else}
-              <span>Belum ada santri yang dipilih</span>
-            {/if}
-          </div>
-
-          <div class="user-list">
-            {#if filteredUsers.length === 0}
-              <div class="no-search-result">
-                <span>🔎</span>
-                <strong>Santri tidak ditemukan</strong>
-                <small>Coba gunakan nama atau email yang berbeda.</small>
-              </div>
-            {:else}
-              {#each filteredUsers as user}
-                <button
-                  type="button"
-                  class:selected={selectedUser === user.id}
-                  class="user-option"
-                  on:click={() => {
-                    userSearch = user.username;
-                    void handleSelectUser(user.id);
-                  }}
-                  disabled={loading}
-                >
-                  <div class="user-avatar">👤</div>
-
-                  <div class="user-option-info">
-                    <strong>{user.username}</strong>
-                    <small>{user.email}</small>
+        {:else}
+          <div class="cart-list">
+            {#each cart as item}
+              <div class="cart-item">
+                {#if item.product.image}
+                  <img src={item.product.image} alt={item.product.name} />
+                {:else}<div class="cart-image-placeholder">📦</div>{/if}
+                <div class="cart-item-info">
+                  <strong>{item.product.name}</strong>
+                  <span>Rp {formatRupiah(item.product.price)}</span>
+                  <div class="cart-controls">
+                    <button on:click={() => decreaseCart(item.product.id)}>−</button>
+                    <b>{item.qty}</b>
+                    <button on:click={() => increaseCart(item.product.id)}>+</button>
                   </div>
-
-                  {#if selectedUser === user.id}
-                    <span class="user-check">✓</span>
-                  {/if}
-                </button>
-              {/each}
-            {/if}
+                </div>
+                <div class="cart-item-total">Rp {formatRupiah(item.product.price * item.qty)}</div>
+                <button class="remove-button" on:click={() => removeFromCart(item.product.id)}>×</button>
+              </div>
+            {/each}
           </div>
-        </div>
 
-        <div class="balance" class:balance-negative={selectedUserBalance < 0}>
-          <small>
-            {#if selectedUserBalance < 0}
-              Utang Santri
-            {:else}
-              Sisa Saldo
-            {/if}
-          </small>
-          <strong>
-            {#if balanceLoading}
-              Memuat saldo...
-            {:else if selectedUserBalance < 0}
-              -Rp {formatRupiah(debtAmount(selectedUserBalance))}
-            {:else}
-              Rp {formatRupiah(selectedUserBalance)}
-            {/if}
-          </strong>
+          <div class="cart-summary">
+            <span>Total</span>
+            <strong>Rp {formatRupiah(cartTotal)}</strong>
+          </div>
 
-          {#if !balanceLoading && selectedUserBalance < 0}
-            <span class="debt-note">
-              Santri masih memiliki utang Rp {formatRupiah(debtAmount(selectedUserBalance))}.
-            </span>
-          {/if}
+          <button class="primary-button full checkout-button" on:click={openCheckout}>Lanjut Checkout</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if showCheckout}
+    <div class="modal-layer" role="presentation">
+      <div class="checkout-modal" role="dialog" aria-modal="true">
+        <div class="drawer-header">
+          <div>
+            <span class="eyebrow">PEMBAYARAN</span>
+            <h2>Checkout</h2>
+          </div>
+          <button class="close-button" on:click={closeCheckout}>×</button>
         </div>
 
         <div class="checkout-total">
-          <span>Total Belanja</span>
-          <strong>
-            Rp {formatRupiah(cartTotal)}
-          </strong>
+          <span>Total belanja</span>
+          <strong>Rp {formatRupiah(cartTotal)}</strong>
         </div>
 
-        {#if selectedUser && selectedUserBalance < cartTotal}
-          <div class="warning debt-warning">
-            ⚠️ Saldo tidak mencukupi. Pembayaran tetap dapat diproses dan
-            <strong>Rp {formatRupiah(cartTotal - selectedUserBalance)}</strong>
-            akan menjadi total utang setelah transaksi.
-          </div>
-        {:else if selectedUser && selectedUserBalance >= cartTotal}
-          <div class="success-note">
-            ✓ Saldo mencukupi untuk pembayaran ini.
+        <label class="form-label">
+          Cari santri
+          <input
+            class="form-input"
+            bind:value={userSearch}
+            placeholder="Ketik nama santri..."
+            autocomplete="off"
+          />
+        </label>
+
+        <div class="santri-search-list">
+          {#if filteredUsers.length === 0}
+            <div class="santri-search-empty">Santri tidak ditemukan.</div>
+          {:else}
+            {#each filteredUsers.slice(0, 8) as user}
+              <button
+                type="button"
+                class="santri-option"
+                class:selected={String(selectedUser) === String(user.id)}
+                on:click={() => handleSelectUser(user.id)}
+              >
+                <span class="santri-avatar">{user.username.charAt(0).toUpperCase()}</span>
+                <span class="santri-option-text">
+                  <strong>{user.username}</strong>
+                  <small>{user.email}</small>
+                </span>
+                {#if String(selectedUser) === String(user.id)}
+                  <span class="santri-check">✓</span>
+                {/if}
+              </button>
+            {/each}
+          {/if}
+        </div>
+
+        {#if selectedSantri}
+          <div class="selected-santri">
+            <span>Santri terpilih</span>
+            <strong>{selectedSantri.username}</strong>
           </div>
         {/if}
 
-        <button
-          class="checkout-btn"
-          disabled={
-            loading ||
-            balanceLoading ||
-            !selectedUser
-          }
-          on:click={checkout}
-        >
-          {loading
-            ? "Memproses..."
-            : "✓ Konfirmasi Pembayaran"}
-        </button>
+        {#if selectedUser}
+          <div class="balance-box">
+            <span>Saldo santri</span>
+            {#if balanceLoading}
+              <strong>Memuat...</strong>
+            {:else}
+              <strong class:negative={selectedUserBalance < 0}>
+                Rp {formatRupiah(selectedUserBalance)}
+              </strong>
+            {/if}
+          </div>
+        {/if}
 
-        <button
-          class="secondary-btn full"
-          disabled={loading}
-          on:click={closeCheckout}
-        >
-          Batal
-        </button>
+        <p class="checkout-note">
+          Jika saldo kurang dari total belanja, selisihnya akan tercatat sebagai saldo negatif/utang.
+        </p>
 
+        <button class="primary-button full" disabled={loading} on:click={checkout}>
+          {loading ? "Memproses..." : "Konfirmasi Pembayaran"}
+        </button>
       </div>
-
     </div>
-
   {/if}
 
+  {#if showProductModal}
+    <div class="modal-layer" role="presentation">
+      <div class="form-modal" role="dialog" aria-modal="true">
+        <div class="drawer-header">
+          <div>
+            <span class="eyebrow">PRODUK</span>
+            <h2>{editingProductId === null ? "Tambah Produk" : "Edit Produk"}</h2>
+          </div>
+          <button class="close-button" on:click={closeProductModal}>×</button>
+        </div>
+
+        <label class="form-label">Nama produk
+          <input class="form-input" bind:value={productForm.name} placeholder="Contoh: Kopi Susu" />
+        </label>
+        <label class="form-label">Harga
+          <input class="form-input" type="number" min="0" bind:value={productForm.price} placeholder="20000" />
+        </label>
+        <label class="form-label">Stock
+          <input class="form-input" type="number" min="0" bind:value={productForm.stock} placeholder="10" />
+        </label>
+        <label class="form-label">URL gambar
+          <input class="form-input" bind:value={productForm.image} placeholder="https://..." />
+        </label>
+
+        <button class="primary-button full" disabled={productLoading} on:click={saveProduct}>
+          {productLoading ? "Menyimpan..." : "Simpan Produk"}
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if showDeleteModal && deletingProduct}
+    <div class="modal-layer" role="presentation">
+      <div class="confirm-modal" role="dialog" aria-modal="true">
+        <div class="confirm-icon">!</div>
+        <h2>Hapus produk?</h2>
+        <p>Produk <strong>{deletingProduct.name}</strong> akan dihapus dari katalog.</p>
+        <div class="confirm-actions">
+          <button class="secondary-button" on:click={() => showDeleteModal = false}>Batal</button>
+          <button class="danger-button" disabled={productLoading} on:click={deleteProduct}>Hapus</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  :global(*) {
-    box-sizing: border-box;
-  }
-
-  :global(html) {
-    scroll-behavior: smooth;
-  }
-
+  :global(*) { box-sizing: border-box; }
+  :global(html) { scroll-behavior: smooth; }
   :global(body) {
     margin: 0;
-    background: #f3f3f3;
-    color: #172033;
-    font-family:
-      Arial,
-      Helvetica,
-      sans-serif;
+    min-width: 320px;
+    background: #eef5fb;
+    color: #294f69;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
+  :global(button), :global(input), :global(select) { font: inherit; }
 
-  button,
-  input,
-  select {
-    font: inherit;
-  }
-
-  button {
-    cursor: pointer;
-  }
-
-  .app {
+  .app-shell {
     min-height: 100vh;
-    background: #f3f3f3;
+    background: linear-gradient(135deg, #f7fbff 0%, #eaf3fa 100%);
   }
 
-  /* =========================================================
-     AMAZON-STYLE HEADER
-     ========================================================= */
-  .topbar {
-    position: sticky;
-    top: 0;
+  .sidebar {
+    position: fixed;
     z-index: 100;
-    min-height: 68px;
-    padding: 9px 28px;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 270px;
+    padding: 28px 18px 20px;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    background: #131921;
-    color: #fff;
-    border-bottom: 1px solid #263241;
+    flex-direction: column;
+    background: rgba(255,255,255,.96);
+    border-right: 1px solid #d4e5f2;
+    box-shadow: 8px 0 30px rgba(60,145,205,.08);
   }
 
   .brand {
     display: flex;
     align-items: center;
+    gap: 12px;
+    padding: 4px 12px 26px 62px;
+  }
+  .brand img {
+    width: 46px;
+    height: 46px;
+    object-fit: contain;
+    border-radius: 14px;
+  }
+  .brand strong {
+    display: block;
+    color: #0e3f66;
+    font-size: 20px;
+    letter-spacing: -.4px;
+  }
+  .brand small {
+    color: #7f9bb0;
+    font-size: 11px;
+  }
+
+  .burger-button {
+    position: fixed;
+    z-index: 140;
+    left: 16px;
+    top: 18px;
+    width: 44px;
+    height: 44px;
+    border: 1px solid #d3e5f1;
+    border-radius: 13px;
+    background: #e6f1f9;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    box-shadow: 0 8px 20px rgba(54,155,218,.12);
+  }
+  .burger-button span {
+    width: 20px;
+    height: 2.5px;
+    border-radius: 5px;
+    background: #0e3f66;
+    transition: .2s;
+  }
+  .burger-button.active span:nth-child(1) { transform: translateY(7.5px) rotate(45deg); }
+  .burger-button.active span:nth-child(2) { opacity: 0; }
+  .burger-button.active span:nth-child(3) { transform: translateY(-7.5px) rotate(-45deg); }
+
+  .nav-menu {
+    display: grid;
+    gap: 7px;
+  }
+  .nav-menu button {
+    position: relative;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: #365b72;
+    border-radius: 15px;
+    padding: 13px 15px;
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    text-align: left;
+    cursor: pointer;
+    font-weight: 650;
+    transition: .2s;
+  }
+  .nav-menu button:hover {
+    background: #eaf3fa;
+    color: #0e3f66;
+  }
+  .nav-menu button.active {
+    background: #dcebf6;
+    color: #0e3f66;
+  }
+  .nav-icon {
+    width: 27px;
+    text-align: center;
+    font-size: 19px;
+  }
+  .cart-nav b {
+    margin-left: auto;
+    min-width: 23px;
+    padding: 3px 7px;
+    border-radius: 20px;
+    background: #0e3f66;
+    color: white;
+    text-align: center;
+    font-size: 11px;
+  }
+
+  .sidebar-bottom {
+    margin-top: auto;
+    display: grid;
     gap: 10px;
-    min-width: 245px;
+  }
+  .user-box {
+    padding: 12px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    background: #f2f7fb;
+    border: 1px solid #d8e8f2;
+    border-radius: 15px;
+  }
+  .user-avatar {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 11px;
+    background: #0e3f66;
+    color: white;
+    font-weight: 800;
+  }
+  .user-box strong, .user-box small { display: block; }
+  .user-box strong { font-size: 13px; color: #315d7d; }
+  .user-box small { margin-top: 2px; color: #8099aa; font-size: 10px; }
+  .logout-button {
+    border: 0;
+    padding: 11px;
+    border-radius: 13px;
+    background: #e6f1f9;
+    color: #0e3f66;
+    font-weight: 700;
     cursor: pointer;
   }
 
-  .brand-icon {
-    width: 48px;
-    height: 42px;
-    display: grid;
-    place-items: center;
-    border-radius: 5px;
-    background: transparent;
-    color: #ff9900;
-    font-size: 27px;
+  .main-content {
+    margin-left: 270px;
+    min-height: 100vh;
   }
 
-  .brand strong,
-  .brand small {
-    display: block;
-  }
-
-  .brand strong {
-    color: #fff;
-    font-size: 22px;
-    line-height: 1;
-    letter-spacing: -.5px;
-  }
-
-  .brand small {
-    margin-top: 5px;
-    color: #c8d0d9;
-    font-size: 11px;
-  }
-
-  .dashboard-btn {
-    border: 1px solid #526171;
-    border-radius: 3px;
-    padding: 9px 14px;
-    background: transparent;
-    color: #fff;
-    font-weight: 700;
-    transition: .2s ease;
-  }
-
-  .dashboard-btn:hover {
-    border-color: #fff;
-  }
-
-  .section-nav {
-    position: sticky;
-    top: 68px;
-    z-index: 90;
-    max-width: none;
-    margin: 0;
-    padding: 0 30px;
-    min-height: 43px;
+  .topbar {
+    height: 80px;
+    padding: 0 36px 0 32px;
     display: flex;
     align-items: center;
-    gap: 4px;
-    background: #232f3e;
-    border-bottom: 1px solid #37475a;
+    justify-content: space-between;
+    background: rgba(255,255,255,.84);
+    border-bottom: 1px solid #d8e7f1;
+    backdrop-filter: blur(12px);
   }
-
-  .section-nav button {
-    min-height: 43px;
-    padding: 8px 14px;
+  .topbar-title {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+  .mobile-brand { display: none; color: #0e3f66; font-size: 20px; font-weight: 800; }
+  .date-label { color: #6d879b; font-size: 13px; }
+  .online-pill {
     display: flex;
     align-items: center;
     gap: 7px;
-    border: 1px solid transparent;
-    border-radius: 0;
-    background: transparent;
-    color: #fff;
-    font-size: 13px;
+    padding: 8px 13px;
+    border: 1px solid #d4e4ee;
+    border-radius: 999px;
+    color: #4f7188;
+    background: #f3f8fc;
+    font-size: 12px;
     font-weight: 700;
   }
-
-  .section-nav button:hover,
-  .section-nav button.active {
-    border-color: #fff;
-    background: #37475a;
-    color: #fff;
-  }
-
-  .section-nav button.active {
-    box-shadow: inset 0 -3px 0 #ff9900;
-  }
-
-  .section-nav .nav-cart {
-    margin-left: auto;
-  }
-
-  .section-nav .nav-cart b {
-    min-width: 19px;
-    height: 19px;
-    padding: 0 5px;
-    display: grid;
-    place-items: center;
+  .online-pill span {
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: #ff9900;
-    color: #111;
+    background: #39b878;
+  }
+
+  .page {
+    width: min(1480px, calc(100% - 64px));
+    margin: 0 auto;
+    padding: 32px 0 60px;
+  }
+
+  .hero {
+    min-height: 270px;
+    overflow: hidden;
+    border-radius: 25px;
+    background:
+      linear-gradient(90deg, rgb(0, 37, 58), rgba(0, 5, 8, 0.908)),
+      url("/logo.png") center/cover;
+    box-shadow: 0 15px 35px rgba(43,139,194,.13);
+  }
+  .hero-overlay {
+    min-height: 270px;
+    max-width: 650px;
+    padding: 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    color: white;
+  }
+  .hero-kicker {
+    margin: 0 0 9px;
+    font-size: 12px;
+    letter-spacing: 2px;
+    font-weight: 800;
+    opacity: .9;
+  }
+  .hero h1 {
+    margin: 0;
+    font-size: clamp(28px, 4vw, 46px);
+    line-height: 1.05;
+    letter-spacing: -1.5px;
+  }
+  .hero p:last-child {
+    margin: 14px 0 0;
+    font-size: 16px;
+    opacity: .94;
+  }
+
+  .section-heading, .page-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 20px;
+    margin: 28px 0 18px;
+  }
+  .eyebrow {
+    display: block;
+    color: #0e3f66;
     font-size: 10px;
     font-weight: 900;
+    letter-spacing: 1.8px;
+    margin-bottom: 5px;
   }
-
-  main {
-    max-width: 1500px;
-    margin: 0 auto;
-    padding: 18px 28px 70px;
+  h1, h2, h3, p { margin-top: 0; }
+  .section-heading h2, .page-header h1 {
+    margin-bottom: 0;
+    color: #2b5675;
+    letter-spacing: -.8px;
   }
+  .page-header p { margin: 5px 0 0; color: #7b94a7; font-size: 13px; }
 
-  .error {
-    max-width: 1444px;
-    margin: 12px auto;
-    padding: 12px 15px;
-    border-radius: 3px;
-    background: #fff;
-    border: 1px solid #d5d9d9;
-    color: #b12704;
-  }
-
-  /* =========================================================
-     HERO - DARK AMAZON HOMEPAGE FEEL
-     ========================================================= */
-  .hero {
-    position: relative;
-    min-height: 300px;
-    padding: 42px 48px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 25px;
-    overflow: hidden;
-    border-radius: 0;
-    color: #fff;
-    background:
-      radial-gradient(circle at 78% 35%, rgba(255,153,0,.18), transparent 26%),
-      linear-gradient(110deg, #07182e 0%, #0d2a50 58%, #132e50 100%);
+  .cart-top-button, .primary-button, .secondary-button, .small-button,
+  .date-filter button, .icon-button {
     border: 0;
-    box-shadow: inset 0 -20px 50px rgba(0,0,0,.12);
+    cursor: pointer;
+    font-weight: 750;
+    transition: transform .15s, box-shadow .15s, background .15s;
   }
+  .cart-top-button:hover, .primary-button:hover, .secondary-button:hover { transform: translateY(-1px); }
 
-  .hero::after {
-    content: "";
-    position: absolute;
-    right: -100px;
-    top: -170px;
-    width: 430px;
-    height: 430px;
-    border: 1px solid rgba(255,153,0,.55);
-    border-radius: 50%;
-    pointer-events: none;
+  .cart-top-button {
+    padding: 11px 16px;
+    border-radius: 12px;
+    background: #dcebf6;
+    color: #0e3f66;
   }
-
-  .hero > div:first-child {
-    position: relative;
-    z-index: 2;
-    max-width: 680px;
-  }
-
-  .hero > div:first-child > span,
-  .page-title > div:first-child > span,
-  .drawer-head > div > span,
-  .modal-head span {
-    color: #ff9900;
+  .cart-top-button span {
+    margin-left: 5px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #0e3f66;
+    color: white;
     font-size: 11px;
-    font-weight: 900;
-    letter-spacing: .12em;
   }
 
-  .hero h1 {
-    margin: 8px 0 7px;
-    color: #fff;
-    font-size: clamp(30px, 4vw, 48px);
-    line-height: 1.04;
-    letter-spacing: -1.3px;
-  }
-
-  .hero p,
-  .page-title p {
-    margin: 0;
-    color: #d7e0ea;
-    line-height: 1.6;
-  }
-
-  .hero-stat {
-    position: relative;
-    z-index: 2;
-    min-width: 170px;
-    padding: 18px 22px;
-    border-radius: 4px;
-    background: rgba(255,255,255,.96);
-    border: 1px solid #d5d9d9;
-    text-align: center;
-    color: #111;
-    box-shadow: 0 8px 25px rgba(0,0,0,.2);
-  }
-
-  .hero-stat strong {
-    display: block;
-    color: #111;
-    font-size: 34px;
-  }
-
-  .hero-stat small {
-    color: #565959;
-  }
-
-  /* =========================================================
-     MARKET / SEARCH
-     ========================================================= */
-  .market-section {
-    margin-top: 22px;
-  }
-
-  .section-head {
-    margin-bottom: 14px;
-  }
-
-  .market-head {
+  .toolbar {
+    margin-bottom: 20px;
     display: flex;
     justify-content: space-between;
-    align-items: end;
-    gap: 20px;
+    gap: 15px;
+    align-items: center;
+  }
+  .category-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .category-tabs button {
+    border: 1px solid #d2e3ee;
+    padding: 10px 17px;
+    border-radius: 999px;
+    background: #e6f1f9;
+    color: #526f84;
+    cursor: pointer;
+    font-weight: 750;
+  }
+  .category-tabs button.active {
+    background: #0e3f66;
+    border-color: #0e3f66;
+    color: white;
+    box-shadow: 0 8px 18px rgba(58,167,235,.2);
+  }
+  .floating-cart {
+    position: fixed; z-index: 125; right: 22px; bottom: 22px;
+    width: 58px; height: 58px; border: 0; border-radius: 50%;
+    display: grid; place-items: center; background: #0e3f66; color: white;
+    cursor: pointer; box-shadow: 0 12px 28px rgba(14,63,102,.28);
+    transition: transform .2s ease, box-shadow .2s ease;
+  }
+  .floating-cart:hover { transform: translateY(-3px); box-shadow: 0 16px 32px rgba(14,63,102,.34); }
+  .floating-cart-icon { font-size: 23px; line-height: 1; }
+  .floating-cart-count {
+    position: absolute; top: -4px; right: -2px; min-width: 22px; height: 22px;
+    padding: 0 6px; display: grid; place-items: center; border-radius: 999px;
+    background: #2d8ac0; color: white; border: 2px solid white; font-size: 10px; font-weight: 900;
   }
 
-  .section-head h2 {
-    margin: 0;
-    color: #172033;
-    font-size: 24px;
+  .santri-search-list {
+    display: grid; gap: 7px; max-height: 220px; overflow-y: auto; margin-top: -4px; padding: 2px;
   }
-
-  .section-head p {
-    margin: 5px 0 0;
-    color: #5f6b78;
-    font-size: 14px;
+  .santri-option {
+    width: 100%; border: 1px solid #d7e7f0; border-radius: 12px; padding: 9px 10px;
+    display: flex; align-items: center; gap: 9px; background: white; color: #365b72;
+    text-align: left; cursor: pointer; transition: .18s ease;
   }
+  .santri-option:hover, .santri-option.selected { border-color: #0e3f66; background: #eef6fb; }
+  .santri-avatar {
+    width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center;
+    border-radius: 10px; background: #0e3f66; color: white; font-size: 13px; font-weight: 900;
+  }
+  .santri-option-text { min-width: 0; display: grid; gap: 2px; flex: 1; }
+  .santri-option-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #294f69; font-size: 12px; }
+  .santri-option-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8198a8; font-size: 9px; }
+  .santri-check { color: #0e3f66; font-weight: 900; }
+  .santri-search-empty { padding: 12px; border-radius: 10px; background: #f5f9fc; color: #879ba9; font-size: 11px; text-align: center; }
+  .selected-santri {
+    margin-top: 10px; padding: 10px 12px; border-radius: 11px; background: #eaf3f8;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .selected-santri span { color: #72899b; font-size: 10px; }
+  .selected-santri strong { color: #0e3f66; font-size: 12px; }
 
   .search-box {
-    min-height: 42px;
+    width: min(280px, 100%);
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 0 11px;
-    background: #fff;
-    border: 1px solid #a6a6a6;
-    border-radius: 3px;
+    padding: 10px 13px;
+    border: 1px solid #d5e5ef;
+    border-radius: 13px;
+    background: white;
   }
-
-  .search-box:focus-within {
-    border-color: #ff9900;
-    box-shadow: 0 0 0 2px rgba(255,153,0,.18);
-  }
-
+  .search-box span { color: #5c87a4; font-size: 20px; }
   .search-box input {
-    min-width: 180px;
     width: 100%;
     border: 0;
     outline: 0;
+    color: #294f69;
     background: transparent;
-    color: #111;
   }
 
-  .clear-search {
-    border: 0;
-    background: transparent;
-    color: #687078;
-  }
-
-  .shop-grid {
+  .product-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 17px;
   }
-
-  .shop-card {
+  .product-card {
+    min-width: 0;
     overflow: hidden;
-    background: #fff;
-    border: 1px solid #ddd;
-    border-radius: 3px;
-    box-shadow: 0 1px 3px rgba(0,0,0,.08);
-    transition: transform .18s ease, box-shadow .18s ease;
+    border: 1px solid #d8e7f0;
+    border-radius: 19px;
+    background: rgba(255,255,255,.94);
+    box-shadow: 0 9px 26px rgba(59,133,175,.10);
+    transition: transform .2s, box-shadow .2s;
   }
-
-  .shop-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 6px 18px rgba(0,0,0,.12);
+  .product-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 15px 32px rgba(59,133,175,.16);
   }
-
-  .shop-image {
-    position: relative;
-    height: 210px;
-    background: #f7f7f7;
+  .product-image-wrap {
+    aspect-ratio: 1 / .83;
+    margin: 10px;
+    overflow: hidden;
+    border-radius: 13px;
+    background: #e5f0f7;
   }
-
-  .shop-image img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+  .product-image { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .image-placeholder, .cart-image-placeholder, .mini-placeholder {
+    display: grid;
+    place-items: center;
+    background: #e3eff7;
+    color: #5e88a3;
   }
-
-  .shop-image span {
-    position: absolute;
-    left: 9px;
-    bottom: 9px;
-    padding: 5px 8px;
-    border-radius: 2px;
-    background: #fff;
-    color: #007600;
-    font-size: 11px;
-    font-weight: 800;
-    box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  .image-placeholder { width: 100%; height: 100%; font-size: 36px; }
+  .product-info { padding: 3px 14px 15px; }
+  .product-category {
+    display: inline-block;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    border-radius: 999px;
+    background: #edf4f9;
+    color: #155784;
+    font-size: 9px;
+    font-weight: 850;
   }
-
-  .shop-body {
-    padding: 14px;
+  .product-info h3 {
+    min-height: 38px;
+    margin: 0;
+    color: #294f69;
+    font-size: 15px;
+    line-height: 1.25;
   }
-
-  .shop-body h3 {
-    min-height: 42px;
-    margin: 0 0 8px;
-    color: #0f1111;
-    font-size: 16px;
-    line-height: 1.3;
+  .product-price {
+    margin-top: 7px;
+    color: #0e3f66;
+    font-size: 15px;
+    font-weight: 850;
   }
-
-  .shop-price {
-    display: block;
-    margin-bottom: 13px;
-    color: #b12704;
-    font-size: 19px;
-  }
-
-  .shop-body button,
-  .empty button {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid #ffb41f;
-    border-radius: 18px;
-    background: #ffd814;
-    color: #111;
-    font-weight: 800;
-    box-shadow: 0 1px 0 rgba(0,0,0,.08);
-  }
-
-  .shop-body button:hover,
-  .empty button:hover {
-    background: #f7ca00;
-  }
-
-  /* =========================================================
-     GENERAL PAGES
-     ========================================================= */
-  .page-section {
-    margin-top: 4px;
-  }
-
-  .page-title {
-    margin-bottom: 22px;
-    padding: 20px 22px;
+  .stock-text { margin-top: 4px; color: #8097a8; font-size: 10px; }
+  .quantity-row {
+    margin: 11px 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 20px;
-    background: #fff;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
+    color: #8196a5;
+    font-size: 10px;
+  }
+  .qty-preview {
+    min-width: 43px;
+    padding: 5px 9px;
+    border: 1px solid #d7e6ef;
+    border-radius: 8px;
+    background: #f6fafe;
+    color: #365b72;
+    text-align: center;
   }
 
-  .page-title h1 {
-    margin: 5px 0;
-    color: #172033;
-    font-size: 29px;
+  .primary-button {
+    padding: 11px 16px;
+    border-radius: 12px;
+    background: #0e3f66;
+    color: white;
+    box-shadow: 0 8px 18px rgba(57,166,233,.18);
+  }
+  .primary-button.full { width: 100%; }
+  .secondary-button {
+    padding: 10px 14px;
+    border-radius: 11px;
+    background: #e4eff6;
+    color: #155784;
+  }
+  .danger-button {
+    padding: 10px 15px;
+    border: 0;
+    border-radius: 11px;
+    background: #e26d79;
+    color: white;
+    font-weight: 800;
+    cursor: pointer;
   }
 
-  .primary-btn {
-    border: 1px solid #ffb41f;
+  .admin-table-card {
+    overflow: hidden;
+    border: 1px solid #d7e7f0;
     border-radius: 18px;
-    padding: 10px 17px;
-    background: #ffd814;
-    color: #111;
+    background: white;
+    box-shadow: 0 9px 25px rgba(60,130,170,.08);
+  }
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 680px; }
+  th, td { padding: 14px 17px; border-bottom: 1px solid #e9f1f6; text-align: left; }
+  th {
+    background: #f3f8fc;
+    color: #72899b;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+  }
+  td { color: #365b72; font-size: 13px; }
+  tbody tr:hover { background: #fafdff; }
+  .table-product { display: flex; align-items: center; gap: 10px; }
+  .table-product img, .mini-placeholder {
+    width: 42px; height: 42px; border-radius: 10px; object-fit: cover;
+  }
+  .mini-placeholder { font-size: 18px; }
+  .category-badge, .type-badge {
+    display: inline-block;
+    padding: 5px 8px;
+    border-radius: 999px;
+    background: #e6f1f9;
+    color: #155784;
+    font-size: 10px;
     font-weight: 800;
   }
-
-  .primary-btn:hover {
-    background: #f7ca00;
-  }
-
-  /* =========================================================
-     ADMIN PRODUCTS
-     ========================================================= */
-  .admin-product-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-    gap: 16px;
-  }
-
-  .admin-product {
-    overflow: hidden;
-    background: #fff;
-    border: 1px solid #ddd;
-    border-radius: 3px;
-    box-shadow: 0 1px 3px rgba(0,0,0,.07);
-  }
-
-  .admin-image {
-    position: relative;
-    height: 185px;
-    background: #f7f7f7;
-  }
-
-  .admin-image img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .sold-out {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    padding: 6px 9px;
-    border-radius: 2px;
-    background: #b12704;
-    color: #fff;
-    font-size: 10px;
-    font-weight: 900;
-  }
-
-  .admin-product-body {
-    padding: 15px;
-  }
-
-  .admin-product-body h3 {
-    margin: 0 0 7px;
-    color: #0f1111;
-  }
-
-  .admin-product-body > p {
-    margin: 0 0 12px;
-    color: #b12704;
-    font-weight: 900;
-  }
-
-  .admin-stock {
-    display: flex;
-    justify-content: space-between;
-    padding: 9px 0;
-    border-top: 1px solid #eaeded;
-    color: #565959;
-    font-size: 13px;
-  }
-
-  .admin-stock strong {
-    color: #111;
-  }
-
-  .admin-actions {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 7px;
-    margin-top: 10px;
-  }
-
-  .admin-actions button {
-    padding: 9px;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
-    font-weight: 700;
-  }
-
-  .edit-btn {
-    background: #fff;
-    color: #1769aa;
-  }
-
-  .delete-btn {
-    background: #fff;
-    color: #b12704;
-  }
-
-  .edit-btn:hover,
-  .delete-btn:hover {
-    background: #f7fafa;
-  }
-
-  /* =========================================================
-     EMPTY / HISTORY
-     ========================================================= */
-  .empty {
-    padding: 55px 20px;
-    text-align: center;
-    background: #fff;
-    border: 1px dashed #aab7c4;
-    border-radius: 4px;
-  }
-
-  .empty > div {
-    font-size: 45px;
-  }
-
-  .empty h3 {
-    margin: 10px 0 5px;
-    color: #111;
-  }
-
-  .empty p {
-    margin: 0 0 17px;
-    color: #667085;
-  }
-
-  .empty button {
-    width: auto;
-    padding-left: 20px;
-    padding-right: 20px;
-  }
+  .type-badge.income { background: #e3f7ed; color: #23805d; }
+  .action-row { display: flex; gap: 7px; }
+  .small-button { padding: 7px 10px; border-radius: 8px; }
+  .small-button.edit { background: #e5f0f7; color: #155784; }
+  .small-button.danger { background: #fff0f1; color: #d96370; }
+  .table-empty, .loading-state { padding: 38px !important; text-align: center; color: #8a9eac; }
 
   .date-filter {
     display: flex;
-    align-items: end;
+    align-items: center;
     gap: 8px;
-  }
-
-  .date-filter label {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    color: #565959;
-    font-size: 12px;
-    font-weight: 700;
-  }
-
-  .date-filter input {
-    min-height: 41px;
-    padding: 8px 10px;
-    border: 1px solid #a6a6a6;
-    border-radius: 3px;
-    background: #fff;
-  }
-
-  .date-filter > button {
-    min-height: 41px;
-    padding: 8px 12px;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
-    background: #fff;
-    color: #374151;
-    font-weight: 700;
-  }
-
-  .history-day {
-    overflow: hidden;
-    margin-bottom: 16px;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
-    background: #fff;
-  }
-
-  .history-day-head {
-    padding: 15px 17px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 15px;
-    background: #f7fafa;
-    border-bottom: 1px solid #eaeded;
-  }
-
-  .history-day-head > div:first-child {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-  }
-
-  .history-icon {
-    width: 40px;
-    height: 40px;
-    display: grid;
-    place-items: center;
-    border-radius: 3px;
-    background: #eef0f0;
-  }
-
-  .history-day-head strong,
-  .history-day-head small {
-    display: block;
-  }
-
-  .history-day-head small {
-    margin-top: 3px;
-    color: #687078;
+    color: #72899b;
     font-size: 11px;
+    font-weight: 700;
   }
-
-  .history-day-head > div:last-child {
-    text-align: right;
+  .date-filter input {
+    padding: 9px 11px;
+    border: 1px solid #d5e5ef;
+    border-radius: 10px;
+    outline: 0;
+    color: #365b72;
+    background: white;
   }
+  .finance-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 
-  .history-day-head > div:last-child strong {
-    color: #b12704;
-  }
-
-  .history-list {
-    background: #fff;
-  }
-
-  .history-item {
-    min-height: 68px;
-    padding: 12px 17px;
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    border-bottom: 1px solid #eaeded;
-  }
-
-  .history-item:last-child {
-    border-bottom: 0;
-  }
-
-  .history-bag {
-    width: 40px;
-    height: 40px;
-    flex: 0 0 40px;
+  .finance-grid {
     display: grid;
-    place-items: center;
-    border-radius: 3px;
-    background: #f3f3f3;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 17px;
   }
-
-  .history-info {
-    min-width: 0;
-    flex: 1;
+  .finance-card {
+    min-height: 130px;
+    padding: 20px;
+    border-radius: 18px;
+    border: 1px solid #d7e7f0;
+    background: white;
+    box-shadow: 0 8px 24px rgba(53,135,180,.08);
   }
+  .finance-card span, .finance-card small { display: block; }
+  .finance-card span { color: #7190a4; font-size: 12px; font-weight: 700; }
+  .finance-card strong { display: block; margin: 9px 0 6px; color: #176b9e; font-size: 24px; }
+  .finance-card small { color: #99adbb; font-size: 10px; }
+  .finance-card.cyan strong { color: #32a9d3; }
+  .finance-card.orange strong { color: #e99a52; }
+  .finance-card.green strong { color: #23805d; }
+  .finance-card.green.loss strong { color: #e16d7c; }
 
-  .history-info strong,
-  .history-info span,
-  .history-info small {
-    display: block;
-  }
-
-  .history-info strong {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #0f1111;
-  }
-
-  .history-info span,
-  .history-info small {
-    margin-top: 2px;
-    color: #687078;
+  .note-box {
+    margin-bottom: 17px;
+    padding: 15px 18px;
+    border: 1px solid #cfeafb;
+    border-radius: 15px;
+    background: #e6f1f9;
+    color: #54748a;
     font-size: 12px;
   }
+  .note-box strong { color: #278ecb; }
+  .note-box p { margin: 5px 0 0; line-height: 1.55; }
 
-  .history-price {
-    color: #b12704;
-    white-space: nowrap;
-    font-size: 13px;
-  }
-
-  /* =========================================================
-     FLOATING CART
-     ========================================================= */
-  .floating-cart {
-    position: fixed;
-    right: 24px;
-    bottom: 24px;
-    z-index: 100;
-    width: 62px;
-    height: 62px;
-    border: 2px solid #fff;
-    border-radius: 50%;
-    background: #ff9900;
-    color: #111;
-    font-size: 25px;
-    box-shadow: 0 6px 20px rgba(0,0,0,.25);
-  }
-
-  .floating-cart span {
-    position: absolute;
-    top: -5px;
-    right: -3px;
-    min-width: 23px;
-    height: 23px;
-    display: grid;
-    place-items: center;
-    padding: 0 5px;
-    border-radius: 50%;
-    background: #b12704;
-    color: #fff;
-    font-size: 10px;
-    font-weight: 900;
-  }
-
-  /* =========================================================
-     CART DRAWER
-     ========================================================= */
-  .drawer-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 500;
-    background: rgba(15,23,42,.55);
-  }
-
-  .cart-drawer {
-    position: fixed;
-    top: 0;
-    right: 0;
-    z-index: 501;
-    width: 410px;
-    max-width: 100%;
-    height: 100vh;
-    padding: 22px;
-    overflow-y: auto;
-    background: #fff;
-    box-shadow: -10px 0 30px rgba(0,0,0,.22);
-  }
-
-  .drawer-head {
+  .card-heading {
+    padding: 16px 18px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding-bottom: 17px;
-    border-bottom: 1px solid #eaeded;
+    justify-content: space-between;
+    border-bottom: 1px solid #e9f1f6;
   }
-
-  .drawer-head h2 {
-    margin: 3px 0 0;
-    color: #111;
+  .card-heading h3 { margin: 0; color: #345b75; font-size: 15px; }
+  .card-heading span { color: #8a9eac; font-size: 10px; }
+  .icon-button {
+    width: 35px; height: 35px; border-radius: 9px;
+    background: #e9f7ff; color: #176b9e; font-size: 18px;
   }
+  .money { font-weight: 800; color: #e28a50; }
+  .money.positive { color: #27a96d; }
 
-  .drawer-head button {
-    width: 38px;
-    height: 38px;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
-    background: #fff;
-  }
-
-  .cart-empty {
-    padding: 65px 10px;
+  .empty-state {
+    padding: 70px 20px;
     text-align: center;
-    color: #687078;
-  }
-
-  .cart-empty div {
-    font-size: 45px;
-  }
-
-  .cart-empty h3 {
-    color: #111;
-  }
-
-  .cart-list {
-    padding-top: 14px;
-  }
-
-  .cart-item {
-    padding: 12px 0;
-    display: flex;
-    gap: 12px;
-    border-bottom: 1px solid #eaeded;
-  }
-
-  .cart-item img {
-    width: 78px;
-    height: 78px;
-    object-fit: cover;
-    border-radius: 3px;
-    background: #f3f3f3;
-  }
-
-  .cart-info {
-    min-width: 0;
-    flex: 1;
-  }
-
-  .cart-info strong {
-    display: block;
-    color: #111;
-  }
-
-  .cart-info > span {
-    display: block;
-    margin-top: 5px;
-    color: #b12704;
-    font-weight: 800;
-  }
-
-  .quantity {
-    margin-top: 9px;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-  }
-
-  .quantity button {
-    width: 29px;
-    height: 29px;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
-    background: #fff;
-  }
-
-  .quantity .remove {
-    margin-left: auto;
-    color: #b12704;
-  }
-
-  .cart-total,
-  .checkout-total,
-  .balance {
-    margin-top: 16px;
-    padding: 15px;
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    background: #f7fafa;
-    border: 1px solid #eaeded;
-    border-radius: 3px;
-  }
-
-  .cart-total strong,
-  .checkout-total strong,
-  .balance strong {
-    color: #b12704;
-  }
-
-  .checkout-btn {
-    width: 100%;
-    margin-top: 12px;
-    padding: 12px 15px;
-    border: 1px solid #ffb41f;
+    border: 1px dashed #cfe8f6;
     border-radius: 18px;
-    background: #ffd814;
-    color: #111;
-    font-weight: 900;
+    background: rgba(255,255,255,.65);
   }
+  .empty-state div { font-size: 40px; }
+  .empty-state h3 { margin: 12px 0 5px; color: #365b72; }
+  .empty-state p { color: #8aa3b3; font-size: 13px; }
 
-  .checkout-btn:hover:not(:disabled) {
-    background: #f7ca00;
-  }
-
-  .checkout-btn:disabled {
-    opacity: .55;
-    cursor: not-allowed;
-  }
-
-  /* =========================================================
-     MODALS
-     ========================================================= */
-  .modal {
+  .modal-layer {
     position: fixed;
+    z-index: 200;
     inset: 0;
-    z-index: 700;
     padding: 20px;
-    display: grid;
-    place-items: center;
-    background: rgba(0, 64, 255, 0.62);
-  }
-
-  .modal-card,
-  .delete-card {
-    width: min(560px, 100%);
-    max-height: 92vh;
-    overflow-y: auto;
-    padding: 24px;
-    background: #fff;
-    border: 1px solid #d5d9d9;
-    border-radius: 4px;
-    box-shadow: 0 20px 60px rgba(0,0,0,.25);
-  }
-
-  .modal-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 15px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid #eaeded;
-  }
-
-  .modal-head h2 {
-    margin: 4px 0 0;
-    color: #111;
-  }
-
-  .modal-head > button {
-    width: 36px;
-    height: 36px;
-    border: 1px solid #d5d9d9;
-    border-radius: 3px;
-    background: #fff;
-  }
-
-  .form {
-    padding-top: 18px;
-    display: grid;
-    gap: 14px;
-  }
-
-  .form label,
-  .select-label > label {
-    display: grid;
-    gap: 6px;
-    color: #374151;
-    font-size: 13px;
-    font-weight: 800;
-  }
-
-  .form input,
-  .select-label input {
-    width: 100%;
-    min-height: 42px;
-    padding: 9px 11px;
-    border: 1px solid #a6a6a6;
-    border-radius: 3px;
-    outline: 0;
-    background: #fff;
-  }
-
-  .form input:focus,
-  .select-label input:focus {
-    border-color: #ff9900;
-    box-shadow: 0 0 0 2px rgba(255,153,0,.15);
-  }
-
-  .modal-preview {
-    width: 100%;
-    max-height: 220px;
-    margin-top: 14px;
-    object-fit: cover;
-    border-radius: 3px;
-    background: #f3f3f3;
-  }
-
-  .modal-actions {
-    margin-top: 20px;
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
+    align-items: stretch;
+    background: rgba(29,82,112,.25);
+    backdrop-filter: blur(4px);
   }
-
-  .secondary-btn {
-    padding: 10px 16px;
-    border: 1px solid #a6a6a6;
-    border-radius: 18px;
-    background: #fff;
-    color: #111;
-    font-weight: 700;
-  }
-
-  .secondary-btn.full {
-    width: 100%;
-    margin-top: 8px;
-  }
-
-  .delete-card {
-    text-align: center;
-  }
-
-  .delete-big {
-    font-size: 48px;
-  }
-
-  .delete-card h2 {
-    margin-bottom: 5px;
-  }
-
-  .checkout-card {
-    width: min(620px, 100%);
-  }
-
-  .selected-user-label {
-    margin-top: 8px;
-    padding: 10px 12px;
-    background: #f7fafa;
-    border: 1px solid #eaeded;
-    border-radius: 3px;
-    font-size: 13px;
-  }
-
-  .user-list {
-    max-height: 230px;
-    margin-top: 8px;
+  .cart-drawer {
+    width: min(520px, 100%);
+    height: 100%;
+    padding: 25px;
     overflow-y: auto;
-    border: 1px solid #eaeded;
-    border-radius: 3px;
+    border-radius: 22px;
+    background: white;
+    box-shadow: -15px 0 50px rgba(37,102,140,.16);
   }
-
-  .user-option {
-    width: 100%;
-    padding: 11px 12px;
+  .checkout-modal, .form-modal, .confirm-modal {
+    width: min(500px, 100%);
+    margin: auto;
+    padding: 25px;
+    border-radius: 22px;
+    background: white;
+    box-shadow: 0 25px 60px rgba(37,102,140,.2);
+  }
+  .confirm-modal { text-align: center; }
+  .drawer-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+    margin-bottom: 20px;
+  }
+  .drawer-header h2 { margin: 0; color: #294f69; }
+  .close-button {
+    width: 38px; height: 38px;
+    border: 0; border-radius: 10px;
+    background: #edf4f9; color: #3999d1;
+    cursor: pointer; font-size: 24px;
+  }
+  .cart-list { display: grid; gap: 10px; }
+  .cart-item {
+    display: grid;
+    grid-template-columns: 55px 1fr auto auto;
     gap: 10px;
-    border: 0;
-    border-bottom: 1px solid #eaeded;
-    background: #fff;
-    text-align: left;
+    align-items: center;
+    padding: 10px;
+    border: 1px solid #e3f0f7;
+    border-radius: 13px;
   }
-
-  .user-option:last-child {
-    border-bottom: 0;
+  .cart-item > img, .cart-image-placeholder {
+    width: 55px; height: 55px; border-radius: 10px; object-fit: cover;
   }
-
-  .user-option:hover,
-  .user-option.selected {
-    background: #fff8e7;
+  .cart-item-info strong, .cart-item-info span { display: block; }
+  .cart-item-info strong { color: #294f69; font-size: 12px; }
+  .cart-item-info span { margin-top: 2px; color: #176b9e; font-size: 11px; font-weight: 700; }
+  .cart-controls { margin-top: 7px; display: flex; align-items: center; gap: 7px; }
+  .cart-controls button {
+    width: 25px; height: 25px; border: 0; border-radius: 7px;
+    background: #e8f6ff; color: #258dcb; cursor: pointer; font-weight: 800;
   }
+  .cart-controls b { min-width: 18px; text-align: center; font-size: 11px; color: #365b72; }
+  .cart-item-total { color: #294f69; font-size: 11px; font-weight: 800; white-space: nowrap; }
+  .remove-button {
+    border: 0; background: transparent; color: #d77d88; cursor: pointer; font-size: 20px;
+  }
+  .cart-summary {
+    margin-top: 18px;
+    padding: 16px 0;
+    border-top: 1px solid #e8f2f7;
+    display: flex;
+    justify-content: space-between;
+    color: #708da0;
+  }
+  .cart-summary strong { color: #176b9e; font-size: 20px; }
+  .checkout-button { margin-top: 5px; }
+  .drawer-empty { padding: 70px 20px; text-align: center; color: #88a0b0; }
+  .drawer-empty div { font-size: 45px; }
 
-  .user-avatar {
-    width: 36px;
-    height: 36px;
+  .checkout-total, .balance-box {
+    padding: 15px;
+    border-radius: 13px;
+    background: #e6f1f9;
+    margin-bottom: 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .checkout-total span, .balance-box span { color: #6f8ca0; font-size: 12px; }
+  .checkout-total strong { color: #176b9e; font-size: 22px; }
+  .balance-box strong { color: #23805d; }
+  .balance-box strong.negative { color: #df6f7c; }
+  .form-label {
     display: grid;
-    place-items: center;
-    border-radius: 50%;
-    background: #eef0f0;
-  }
-
-  .user-option-info {
-    min-width: 0;
-    flex: 1;
-  }
-
-  .user-option-info strong,
-  .user-option-info small {
-    display: block;
-  }
-
-  .user-option-info strong {
-    color: #111;
-  }
-
-  .user-option-info small {
-    margin-top: 2px;
-    color: #687078;
-  }
-
-  .user-check {
-    color: #007600;
-    font-size: 18px;
-    font-weight: 900;
-  }
-
-  .no-search-result {
-    padding: 24px;
-    display: grid;
-    gap: 4px;
-    place-items: center;
-    text-align: center;
-    color: #687078;
-  }
-
-  .balance {
-    margin-top: 15px;
-  }
-
-
-  .balance strong {
-    display: block;
-    min-height: 24px;
-    margin-top: 4px;
-  }
-
-  .user-option:disabled {
-    cursor: wait;
-    opacity: .65;
-  }
-
-  .balance-negative strong {
-    color: #b12704;
-  }
-
-  .debt-note {
-    display: block;
-    margin-top: 5px;
-    color: #b12704;
+    gap: 7px;
+    margin: 13px 0;
+    color: #365b72;
     font-size: 12px;
-    line-height: 1.4;
+    font-weight: 750;
   }
-
-  .debt-warning {
-    border-color: #e0a800;
-    background: #fff8e1;
-    color: #7a5200;
-  }
-
-  .success-note {
-    margin: 10px 0;
-    padding: 11px 13px;
-    border: 1px solid #b7dfb9;
-    border-radius: 4px;
-    background: #f1fbf2;
-    color: #216e2a;
-    font-size: 13px;
-    line-height: 1.45;
-  }
-
-  .warning {
-    margin-top: 10px;
+  .form-input {
+    width: 100%;
     padding: 11px 12px;
-    border: 1px solid #f0c36d;
-    border-radius: 3px;
-    background: #fff8e7;
-    color: #7a4f01;
-    font-size: 13px;
+    border: 1px solid #d7ebf7;
+    border-radius: 10px;
+    outline: 0;
+    background: white;
+    color: #3c627a;
+  }
+  .form-input:focus { border-color: #58afe5; box-shadow: 0 0 0 3px rgba(65,169,230,.12); }
+  .checkout-note { margin: 14px 0; color: #8aa0af; font-size: 11px; line-height: 1.5; }
+
+  .confirm-icon {
+    width: 48px; height: 48px; margin: 0 auto 12px;
+    display: grid; place-items: center; border-radius: 50%;
+    background: #fff0f1; color: #dc6b78; font-size: 25px; font-weight: 900;
+  }
+  .confirm-modal h2 { margin-bottom: 7px; color: #294f69; }
+  .confirm-modal p { color: #829baa; font-size: 13px; }
+  .confirm-actions { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
+
+  .sidebar-backdrop { display: none; }
+  .alert-message {
+    margin: 20px auto 0;
+    width: min(1480px, calc(100% - 64px));
+    padding: 12px 15px;
+    border-radius: 12px;
+    background: #fff0f1;
+    color: #d36774;
+    font-size: 12px;
   }
 
-  /* =========================================================
-     RESPONSIVE
-     ========================================================= */
-  @media (max-width: 900px) {
-    .topbar {
-      padding: 9px 16px;
-    }
-
-    .brand {
-      min-width: auto;
-    }
-
-    .brand small {
-      display: none;
-    }
-
-    .section-nav {
-      padding: 0 12px;
-      overflow-x: auto;
-    }
-
-    .section-nav .nav-cart {
-      margin-left: 0;
-    }
-
-    main {
-      padding: 14px 14px 65px;
-    }
-
-    .hero {
-      min-height: 260px;
-      padding: 30px 24px;
-    }
-
-    .hero-stat {
-      min-width: 130px;
-    }
-
-    .market-head {
-      align-items: stretch;
-      flex-direction: column;
-    }
-
-    .product-search {
-      width: 100%;
-    }
-
-    .search-box input {
-      min-width: 0;
-    }
+  @media (max-width: 1350px) {
+    .product-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   }
 
-  @media (max-width: 620px) {
-    .topbar {
-      min-height: 60px;
-      position: relative;
+  @media (max-width: 1050px) {
+    .sidebar {
+      transform: translateX(-105%);
+      transition: transform .25s ease;
+      box-shadow: 12px 0 35px rgba(44,119,164,.16);
     }
-
-    .section-nav {
-      position: relative;
-      top: 0;
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-backdrop {
+      display: block;
+      position: fixed;
+      z-index: 90;
+      inset: 0;
+      border: 0;
+      background: rgba(24,76,105,.22);
     }
-
-    .brand strong {
-      font-size: 18px;
-    }
-
-    .dashboard-btn {
-      padding: 8px 10px;
-      font-size: 12px;
-    }
-
-    .hero {
-      min-height: 300px;
-      padding: 28px 20px;
-      align-items: flex-start;
-      flex-direction: column;
-    }
-
-    .hero h1 {
-      font-size: 32px;
-    }
-
-    .hero-stat {
-      width: 100%;
-      text-align: left;
-    }
-
-    .page-title {
-      align-items: stretch;
-      flex-direction: column;
-    }
-
-    .date-filter {
-      align-items: stretch;
-      flex-direction: column;
-    }
-
-    .date-filter input,
-    .date-filter > button {
-      width: 100%;
-    }
-
-    .admin-actions {
-      grid-template-columns: 1fr;
-    }
-
-    .history-day-head {
-      align-items: flex-start;
-      flex-direction: column;
-    }
-
-    .history-day-head > div:last-child {
-      text-align: left;
-    }
-
-    .history-price {
-      font-size: 11px;
-    }
-
-    .floating-cart {
-      right: 16px;
-      bottom: 16px;
-    }
-
-    .cart-drawer {
-      width: 100%;
-      padding: 18px;
-    }
-
-    .modal {
-      padding: 10px;
-    }
-
-    .modal-card,
-    .delete-card {
-      padding: 18px;
-    }
+    .main-content { margin-left: 0; }
+    .mobile-brand { display: inline; }
+    .topbar { padding-left: 76px; }
+    .product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .finance-grid { grid-template-columns: repeat(2, 1fr); }
   }
 
-  @media (max-width: 420px) {
-    .shop-grid,
-    .admin-product-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-
-    .shop-image,
-    .admin-image {
-      height: 150px;
-    }
-
-    .shop-body {
-      padding: 11px;
-    }
-
-    .shop-body h3 {
-      min-height: 48px;
-      font-size: 14px;
-    }
-
-    .shop-price {
-      font-size: 16px;
-    }
-
-    .shop-body button {
-      padding: 9px 6px;
-      font-size: 11px;
-    }
-
-    .admin-product-body {
-      padding: 11px;
-    }
-
-    .admin-product-body h3 {
-      font-size: 14px;
-    }
+  @media (max-width: 720px) {
+    .topbar { height: 68px; padding-right: 15px; }
+    .date-label { display: none; }
+    .online-pill { padding: 7px 10px; }
+    .page { width: calc(100% - 28px); padding-top: 18px; }
+    .hero, .hero-overlay { min-height: 220px; }
+    .hero-overlay { padding: 28px; }
+    .hero h1 { font-size: 31px; }
+    .section-heading, .page-header { align-items: flex-start; flex-direction: column; }
+    .toolbar { flex-direction: column; align-items: stretch; }
+    .search-box { width: 100%; }
+    .product-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+    .product-info { padding: 2px 10px 11px; }
+    .product-info h3 { font-size: 13px; min-height: 33px; }
+    .product-price { font-size: 13px; }
+    .category-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+    .category-tabs button { white-space: nowrap; padding: 9px 13px; }
+    .finance-grid { grid-template-columns: 1fr; }
+    .finance-actions { width: 100%; }
+    .finance-actions > * { flex: 1; }
+    .date-filter { justify-content: space-between; }
+    .date-filter input { min-width: 0; }
+    .floating-cart { right: 15px; bottom: 15px; width: 54px; height: 54px; }
+    .cart-drawer { padding: 19px; border-radius: 17px; }
+    .cart-item { grid-template-columns: 48px 1fr auto; }
+    .cart-item-total { grid-column: 2; }
+    .remove-button { grid-column: 3; grid-row: 1; }
+    .modal-layer { padding: 10px; }
   }
 
-  @media (max-width: 360px) {
-    .shop-grid,
-    .admin-product-grid {
-      grid-template-columns: 1fr;
-    }
+  @media (max-width: 430px) {
+    .product-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .product-image-wrap { margin: 7px; }
+    .product-category { font-size: 8px; }
+    .product-info h3 { font-size: 12px; }
+    .primary-button { padding: 10px 11px; font-size: 12px; }
+    .hero-overlay { padding: 22px; }
+    .hero h1 { font-size: 27px; }
   }
 </style>
