@@ -3675,7 +3675,7 @@
 
 
                 <span class="bank-owner">
-                  a.n Pesantren SPP / Kantin
+                  a.n AGUS YUSUP
                 </span>
               </div>
             </div>
@@ -3685,7 +3685,7 @@
                 rekening-num
               "
             >
-              1234567890
+              1018392778
             </div>
 
 
@@ -3695,7 +3695,7 @@
               "
               on:click={() =>
                 copyRekening(
-                  "1234567890"
+                  "1018392778"
                 )}
             >
               📋 Salin Nomor
@@ -3724,7 +3724,6 @@
 
 
                 <span class="bank-owner">
-                  a.n Pesantren SPP / Kantin
                 </span>
               </div>
             </div>
@@ -3734,7 +3733,7 @@
                 rekening-num
               "
             >
-              9876543210
+              551301029259535
             </div>
 
 
@@ -3744,7 +3743,7 @@
               "
               on:click={() =>
                 copyRekening(
-                  "9876543210"
+                  "551301029259535"
                 )}
             >
               📋 Salin Nomor
