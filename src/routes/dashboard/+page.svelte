@@ -835,16 +835,8 @@ import * as XLSX from "xlsx";
       return;
     }
 
-    const currentBalance = getSantriBalance(Number(pocketExpenseUserId));
-
-    if (amount > currentBalance) {
-      showToast(
-        `Saldo santri tidak cukup. Saldo tersedia Rp ${formatRupiah(currentBalance)}.`,
-        true
-      );
-      return;
-    }
-
+    // Pengeluaran tetap diperbolehkan meskipun saldo tidak cukup.
+    // Selisih negatif otomatis menjadi hutang santri.
     const { error } = await supabase
       .from("entries")
       .insert([
@@ -4461,9 +4453,9 @@ async function deleteUser(
               <div class="pocket-balance-card">
                 <div class="pocket-balance-icon">💰</div>
                 <div>
-                  <span>Saldo Saat Ini</span>
-                  <strong>
-                    Rp {formatRupiah(selectedPocketExpenseBalance)}
+                  <span>{selectedPocketExpenseBalance < 0 ? "Hutang Saat Ini" : "Saldo Saat Ini"}</span>
+                  <strong class:money-out={selectedPocketExpenseBalance < 0}>
+                    {selectedPocketExpenseBalance < 0 ? "- " : ""}Rp {formatRupiah(Math.abs(selectedPocketExpenseBalance))}
                   </strong>
                   {#if selectedPocketExpenseSantri}
                     <small>
@@ -4498,13 +4490,12 @@ async function deleteUser(
                   type="number"
                   min="1"
                   step="1"
-                  max={selectedPocketExpenseBalance}
                   bind:value={pocketExpenseAmount}
                   placeholder="Contoh: 10000"
                 />
                 {#if selectedPocketExpenseSantri && Number(pocketExpenseAmount) > selectedPocketExpenseBalance}
-                  <small class="field-error">
-                    Jumlah melebihi saldo santri.
+                  <small class="field-warning">
+                    Saldo tidak mencukupi. Pengeluaran tetap dapat disimpan dan kekurangannya akan menjadi hutang santri.
                   </small>
                 {/if}
               </div>
@@ -4558,12 +4549,19 @@ async function deleteUser(
                   </div>
 
                   <div>
-                    <span>Saldo</span>
-                    <strong>
-                      Rp {formatRupiah(selectedPocketExpenseBalance)}
+                    <span>{selectedPocketExpenseBalance < 0 ? "Hutang" : "Saldo"}</span>
+                    <strong class:money-out={selectedPocketExpenseBalance < 0}>
+                      {selectedPocketExpenseBalance < 0 ? "- " : ""}Rp {formatRupiah(Math.abs(selectedPocketExpenseBalance))}
                     </strong>
                   </div>
                 </div>
+
+                {#if selectedPocketExpenseBalance < 0}
+                  <div class="pocket-debt-alert">
+                    ⚠️ Santri memiliki hutang <strong>Rp {formatRupiah(Math.abs(selectedPocketExpenseBalance))}</strong>.
+                    Hutang ini akan berkurang ketika ada top up/pemasukan berikutnya.
+                  </div>
+                {/if}
               {:else}
                 <div class="pocket-empty-state">
                   <div>👤</div>
@@ -6375,6 +6373,25 @@ async function deleteUser(
 
   .pocket-empty-state.small {
     min-height: 90px;
+  }
+
+  .field-warning {
+    display: block;
+    margin-top: 6px;
+    color: #b45309;
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+
+  .pocket-debt-alert {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    color: #9a3412;
+    font-size: 0.9rem;
+    line-height: 1.5;
   }
 
   @media (max-width: 900px) {
