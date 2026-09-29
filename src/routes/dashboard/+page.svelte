@@ -94,6 +94,7 @@ import * as XLSX from "xlsx";
     | "schedule"
     | "barcode"
     | "topup"
+    | "pocket-expense"
     | "announcement"
     | "santri-report";
 
@@ -340,6 +341,55 @@ import * as XLSX from "xlsx";
     | string = "";
 
   let transactionUserId = "";
+  let transactionSantriSearch = "";
+  $: filteredTransactionSantri = santriUsers.filter((santri) => {
+    const keyword = transactionSantriSearch.trim().toLowerCase();
+
+    if (!keyword) return true;
+
+    return [
+      santri.full_name || "",
+      santri.username || "",
+      santri.id?.toString() || "",
+      santri.class_name || ""
+    ].some((value) => value.toLowerCase().includes(keyword));
+  });
+
+  /* =========================
+     PENGELUARAN UANG JAJAN
+  ========================= */
+
+  let pocketExpenseName = "Uang jajan";
+  let pocketExpenseDate =
+    new Date()
+      .toISOString()
+      .split("T")[0];
+  let pocketExpenseAmount: number | string = "";
+  let pocketExpenseUserId = "";
+  let pocketExpenseSantriSearch = "";
+
+  $: filteredPocketExpenseSantri = santriUsers.filter((santri) => {
+    const keyword = pocketExpenseSantriSearch.trim().toLowerCase();
+
+    if (!keyword) return true;
+
+    return [
+      santri.full_name || "",
+      santri.username || "",
+      santri.id?.toString() || "",
+      santri.class_name || ""
+    ].some((value) => value.toLowerCase().includes(keyword));
+  });
+
+  $: selectedPocketExpenseSantri =
+    santriUsers.find(
+      (santri) => santri.id === Number(pocketExpenseUserId)
+    ) || null;
+
+  $: selectedPocketExpenseBalance =
+    selectedPocketExpenseSantri
+      ? getSantriBalance(selectedPocketExpenseSantri.id)
+      : 0;
 
   /* =========================
      ATTENDANCE
@@ -735,6 +785,96 @@ import * as XLSX from "xlsx";
      CALCULATE MONEY
   ========================= */
 
+  function getSantriBalance(userId: number) {
+    return entries
+      .filter((entry) => Number(entry.user_id) === userId)
+      .reduce((total, entry) => {
+        const amount = Number(entry.amount || 0);
+        return entry.kind === "pemasukan"
+          ? total + amount
+          : total - amount;
+      }, 0);
+  }
+
+  function getSantriTotalPemasukan(userId: number) {
+    return entries
+      .filter(
+        (entry) =>
+          Number(entry.user_id) === userId &&
+          entry.kind === "pemasukan"
+      )
+      .reduce((total, entry) => total + Number(entry.amount || 0), 0);
+  }
+
+  function getSantriTotalPengeluaran(userId: number) {
+    return entries
+      .filter(
+        (entry) =>
+          Number(entry.user_id) === userId &&
+          entry.kind === "pengeluaran"
+      )
+      .reduce((total, entry) => total + Number(entry.amount || 0), 0);
+  }
+
+  async function addPocketExpense() {
+    if (!isAdmin) {
+      showToast("Hanya admin yang dapat mencatat pengeluaran uang jajan.", true);
+      return;
+    }
+
+    const amount = Number(pocketExpenseAmount);
+
+    if (
+      !pocketExpenseUserId ||
+      !pocketExpenseDate ||
+      !pocketExpenseName.trim() ||
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      showToast("Santri, keterangan, tanggal, dan jumlah wajib diisi.", true);
+      return;
+    }
+
+    const currentBalance = getSantriBalance(Number(pocketExpenseUserId));
+
+    if (amount > currentBalance) {
+      showToast(
+        `Saldo santri tidak cukup. Saldo tersedia Rp ${formatRupiah(currentBalance)}.`,
+        true
+      );
+      return;
+    }
+
+    const { error } = await supabase
+      .from("entries")
+      .insert([
+        {
+          name: pocketExpenseName.trim(),
+          date: pocketExpenseDate,
+          amount,
+          kind: "pengeluaran",
+          user_id: Number(pocketExpenseUserId)
+        }
+      ]);
+
+    if (error) {
+      showToast(
+        "Gagal mencatat pengeluaran: " + error.message,
+        true
+      );
+      return;
+    }
+
+    showToast("✓ Pengeluaran uang jajan berhasil dicatat.");
+
+    pocketExpenseName = "Uang jajan";
+    pocketExpenseAmount = "";
+    pocketExpenseUserId = "";
+    pocketExpenseSantriSearch = "";
+    pocketExpenseDate = new Date().toISOString().split("T")[0];
+
+    await loadEntries();
+  }
   function calculateStats() {
 
     totalPemasukan =
@@ -1067,6 +1207,7 @@ import * as XLSX from "xlsx";
     transactionName = "";
     transactionAmount = "";
     transactionUserId = "";
+    transactionSantriSearch = "";
 
     await loadEntries();
   }
@@ -2475,6 +2616,18 @@ async function deleteUser(
           Top Up Saldo
         </button>
 
+        <button
+          class:active={
+            activeView === "pocket-expense"
+          }
+          class="nav-item"
+          on:click={() =>
+            changeView("pocket-expense")}
+        >
+          💸
+          Pengeluaran Jajan
+        </button>
+
       {/if}
 
     </nav>
@@ -2671,6 +2824,13 @@ async function deleteUser(
                 <div class="s-icon blue">🆔</div>
                 <span>Barcode</span>
               </button>
+
+              {#if isAdmin}
+                <button class="service-item" on:click={() => changeView("pocket-expense")}>
+                  <div class="s-icon red">💸</div>
+                  <span>Pengeluaran Jajan</span>
+                </button>
+              {/if}
 
             </div>
 
@@ -4148,27 +4308,26 @@ async function deleteUser(
                 Pilih Santri
               </label>
 
-              <select
-                bind:value={
-                  transactionUserId
-                }
-              >
+              <input
+                type="text"
+                bind:value={transactionSantriSearch}
+                placeholder="🔍 Cari nama, username, ID, atau kelas..."
+                class="w-full"
+              />
 
+              <select
+                bind:value={transactionUserId}
+              >
                 <option value="">
                   -- Pilih Santri --
                 </option>
 
-
-                {#each santriUsers as santri}
-
-                  <option
-                    value={santri.id}
-                  >
-                    {santri.username}
+                {#each filteredTransactionSantri as santri}
+                  <option value={santri.id}>
+                    {santri.full_name || santri.username || `Santri #${santri.id}`}
+                    {santri.class_name ? ` - ${santri.class_name}` : ""}
                   </option>
-
                 {/each}
-
               </select>
 
             </div>
@@ -4239,6 +4398,216 @@ async function deleteUser(
             </button>
 
           </form>
+
+        </div>
+
+      <!-- =========================
+           PENGELUARAN UANG JAJAN
+      ========================= -->
+
+      {:else if activeView === "pocket-expense"}
+
+        <div class="bca-card sub-view-container pocket-expense-page">
+
+          <div class="sub-header-row">
+            <div>
+              <h3>
+                💸 Pengeluaran Uang Jajan Santri
+              </h3>
+              <p class="sub-description">
+                Catat pemakaian saldo santri untuk uang jajan. Saldo akan otomatis berkurang.
+              </p>
+            </div>
+
+            <button
+              class="btn-back"
+              on:click={() => changeView("home")}
+            >
+              ← Kembali
+            </button>
+          </div>
+
+          <div class="pocket-expense-layout">
+
+            <form
+              class="quick-form pocket-expense-form"
+              on:submit|preventDefault={addPocketExpense}
+            >
+
+              <div class="form-group">
+                <label>🔎 Cari Santri</label>
+
+                <input
+                  type="text"
+                  bind:value={pocketExpenseSantriSearch}
+                  placeholder="Cari nama, username, ID, atau kelas..."
+                  class="w-full"
+                />
+
+                <select bind:value={pocketExpenseUserId}>
+                  <option value="">
+                    -- Pilih Santri --
+                  </option>
+
+                  {#each filteredPocketExpenseSantri as santri}
+                    <option value={santri.id}>
+                      {santri.full_name || santri.username || `Santri #${santri.id}`}
+                      {santri.class_name ? ` - ${santri.class_name}` : ""}
+                    </option>
+                  {/each}
+                </select>
+              </div>
+
+              <div class="pocket-balance-card">
+                <div class="pocket-balance-icon">💰</div>
+                <div>
+                  <span>Saldo Saat Ini</span>
+                  <strong>
+                    Rp {formatRupiah(selectedPocketExpenseBalance)}
+                  </strong>
+                  {#if selectedPocketExpenseSantri}
+                    <small>
+                      {selectedPocketExpenseSantri.full_name || selectedPocketExpenseSantri.username}
+                    </small>
+                  {:else}
+                    <small>Pilih santri untuk melihat saldo</small>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Keterangan Pengeluaran</label>
+                <input
+                  type="text"
+                  bind:value={pocketExpenseName}
+                  placeholder="Contoh: Uang jajan"
+                />
+              </div>
+
+              <div class="form-group">
+                <label>Tanggal</label>
+                <input
+                  type="date"
+                  bind:value={pocketExpenseDate}
+                />
+              </div>
+
+              <div class="form-group">
+                <label>Jumlah Pengeluaran</label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  max={selectedPocketExpenseBalance}
+                  bind:value={pocketExpenseAmount}
+                  placeholder="Contoh: 10000"
+                />
+                {#if selectedPocketExpenseSantri && Number(pocketExpenseAmount) > selectedPocketExpenseBalance}
+                  <small class="field-error">
+                    Jumlah melebihi saldo santri.
+                  </small>
+                {/if}
+              </div>
+
+              <button
+                type="submit"
+                class="btn-primary big-button"
+                disabled={!selectedPocketExpenseSantri || !Number(pocketExpenseAmount)}
+              >
+                💸 Simpan Pengeluaran
+              </button>
+
+            </form>
+
+            <div class="pocket-expense-summary">
+              <div class="pocket-summary-header">
+                <div>
+                  <h4>Ringkasan Saldo Santri</h4>
+                  <p>Pemasukan dan pengeluaran dihitung dari riwayat transaksi.</p>
+                </div>
+              </div>
+
+              {#if selectedPocketExpenseSantri}
+                <div class="pocket-summary-profile">
+                  <div class="pocket-avatar">
+                    {(selectedPocketExpenseSantri.full_name || selectedPocketExpenseSantri.username || "S").charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <strong>
+                      {selectedPocketExpenseSantri.full_name || selectedPocketExpenseSantri.username}
+                    </strong>
+                    <span>
+                      {selectedPocketExpenseSantri.class_name || "Kelas belum diatur"}
+                    </span>
+                  </div>
+                </div>
+
+                <div class="pocket-summary-grid">
+                  <div>
+                    <span>Total Masuk</span>
+                    <strong class="money-in">
+                      Rp {formatRupiah(getSantriTotalPemasukan(selectedPocketExpenseSantri.id))}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>Total Keluar</span>
+                    <strong class="money-out">
+                      Rp {formatRupiah(getSantriTotalPengeluaran(selectedPocketExpenseSantri.id))}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>Saldo</span>
+                    <strong>
+                      Rp {formatRupiah(selectedPocketExpenseBalance)}
+                    </strong>
+                  </div>
+                </div>
+              {:else}
+                <div class="pocket-empty-state">
+                  <div>👤</div>
+                  <p>Pilih santri untuk melihat ringkasan saldo.</p>
+                </div>
+              {/if}
+
+              <div class="pocket-recent-title">
+                <h4>Transaksi Terakhir</h4>
+              </div>
+
+              {#if selectedPocketExpenseSantri}
+                {#if entries.filter((entry) => Number(entry.user_id) === selectedPocketExpenseSantri?.id).length === 0}
+                  <div class="pocket-empty-state small">
+                    <p>Belum ada transaksi untuk santri ini.</p>
+                  </div>
+                {:else}
+                  <div class="pocket-transaction-list">
+                    {#each entries
+                      .filter((entry) => Number(entry.user_id) === selectedPocketExpenseSantri?.id)
+                      .slice(0, 8) as entry}
+                      <div class="pocket-transaction-item">
+                        <div class="pocket-transaction-icon {entry.kind}">
+                          {entry.kind === "pemasukan" ? "↗" : "↘"}
+                        </div>
+                        <div class="pocket-transaction-detail">
+                          <strong>{entry.name}</strong>
+                          <small>{formatDate(entry.date)}</small>
+                        </div>
+                        <strong class:money-in={entry.kind === "pemasukan"} class:money-out={entry.kind === "pengeluaran"}>
+                          {entry.kind === "pemasukan" ? "+" : "-"} Rp {formatRupiah(entry.amount)}
+                        </strong>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              {:else}
+                <div class="pocket-empty-state small">
+                  <p>Pilih santri untuk melihat transaksi.</p>
+                </div>
+              {/if}
+            </div>
+
+          </div>
 
         </div>
 
@@ -5771,6 +6140,248 @@ async function deleteUser(
 
   }
 
+
+  /* =========================
+     PENGELUARAN UANG JAJAN
+  ========================= */
+
+  .pocket-expense-page {
+    min-height: 400px;
+  }
+
+  .pocket-expense-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
+    gap: 22px;
+    align-items: start;
+  }
+
+  .pocket-expense-form {
+    margin: 0;
+  }
+
+  .pocket-balance-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px;
+    margin-bottom: 16px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #eff6ff, #f8fbff);
+    border: 1px solid #dbeafe;
+  }
+
+  .pocket-balance-icon {
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #dbeafe;
+    font-size: 22px;
+  }
+
+  .pocket-balance-card span,
+  .pocket-balance-card small {
+    display: block;
+    color: #64748b;
+  }
+
+  .pocket-balance-card strong {
+    display: block;
+    margin: 3px 0;
+    font-size: 24px;
+    color: #0f172a;
+  }
+
+  .pocket-balance-card small {
+    font-size: 12px;
+  }
+
+  .field-error {
+    display: block;
+    margin-top: 6px;
+    color: #dc2626;
+    font-size: 12px;
+  }
+
+  .pocket-expense-form button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+  }
+
+  .pocket-expense-summary {
+    padding: 20px;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    background: #fff;
+  }
+
+  .pocket-summary-header h4,
+  .pocket-recent-title h4 {
+    margin: 0;
+    color: #0f172a;
+  }
+
+  .pocket-summary-header p {
+    margin: 5px 0 0;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .pocket-summary-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 18px 0;
+    padding: 12px;
+    border-radius: 12px;
+    background: #f8fafc;
+  }
+
+  .pocket-avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e0e7ff;
+    color: #3730a3;
+    font-weight: 700;
+  }
+
+  .pocket-summary-profile strong,
+  .pocket-summary-profile span {
+    display: block;
+  }
+
+  .pocket-summary-profile span {
+    margin-top: 3px;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .pocket-summary-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .pocket-summary-grid > div {
+    padding: 13px;
+    border-radius: 11px;
+    background: #f8fafc;
+  }
+
+  .pocket-summary-grid span {
+    display: block;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .pocket-summary-grid strong {
+    display: block;
+    margin-top: 4px;
+    color: #0f172a;
+  }
+
+  .money-in {
+    color: #15803d !important;
+  }
+
+  .money-out {
+    color: #dc2626 !important;
+  }
+
+  .pocket-recent-title {
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid #e2e8f0;
+  }
+
+  .pocket-transaction-list {
+    margin-top: 10px;
+  }
+
+  .pocket-transaction-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  .pocket-transaction-icon {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+  }
+
+  .pocket-transaction-icon.pemasukan {
+    background: #dcfce7;
+    color: #15803d;
+  }
+
+  .pocket-transaction-icon.pengeluaran {
+    background: #fee2e2;
+    color: #dc2626;
+  }
+
+  .pocket-transaction-detail {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .pocket-transaction-detail strong,
+  .pocket-transaction-detail small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pocket-transaction-detail small {
+    margin-top: 2px;
+    color: #94a3b8;
+    font-size: 11px;
+  }
+
+  .pocket-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 150px;
+    text-align: center;
+    color: #64748b;
+  }
+
+  .pocket-empty-state > div {
+    font-size: 32px;
+    margin-bottom: 8px;
+  }
+
+  .pocket-empty-state p {
+    margin: 0;
+    font-size: 13px;
+  }
+
+  .pocket-empty-state.small {
+    min-height: 90px;
+  }
+
+  @media (max-width: 900px) {
+    .pocket-expense-layout {
+      grid-template-columns: 1fr;
+    }
+  }
 
   /* =========================
      SUB PAGE
