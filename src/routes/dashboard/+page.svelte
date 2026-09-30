@@ -395,25 +395,208 @@ import * as XLSX from "xlsx";
      ATTENDANCE
   ========================= */
 
-  let attendanceDate =
-    new Date()
-      .toISOString()
-      .split("T")[0];
-
+  let attendanceDate = new Date().toISOString().split("T")[0];
   let selectedAttendanceUser = "";
+  let attendanceMode: "santri" | "ustad" = "santri";
   let attendanceClassFilter = "";
   let attendanceSearch = "";
-
-  // Jenjang absensi dibuat terpisah agar saat tombol SD/SMP/SMA diklik
-  // hanya santri pada jenjang tersebut yang ditampilkan.
   let attendanceSection: "SD" | "SMP" | "SMA" = "SD";
   let attendanceSmpClass = "";
+  let attendanceStatus: Attendance["status"] = "hadir";
 
-  let attendanceStatus:
-    | "hadir"
-    | "izin"
-    | "sakit"
-    | "alpha" = "hadir";
+  // Absensi ustad hanya dapat diinput oleh admin.
+  let selectedUstadAttendanceUser = "";
+  let ustadAttendance: Attendance[] = [];
+  let ustadAttendanceStatus: Attendance["status"] = "hadir";
+  let ustadAttendanceSearch = "";
+  let savingUstadAttendance = false;
+
+  // Laporan bulanan ustad.
+  let ustadReportYear = new Date().getFullYear();
+  let ustadReportMonth = new Date().getMonth() + 1;
+  let ustadReportData: Attendance[] = [];
+  let loadingUstadReport = false;
+
+  async function loadUstadAttendance() {
+    if (!isAdmin) {
+      ustadAttendance = [];
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("attendance_ustad")
+      .select("*")
+      .eq("date", attendanceDate)
+      .order("id", { ascending: false });
+
+    if (error) {
+      showToast("Gagal memuat absensi ustad: " + error.message, true);
+      ustadAttendance = [];
+      return;
+    }
+
+    ustadAttendance = (data || []) as Attendance[];
+
+    if (selectedUstadAttendanceUser) {
+      const existing = ustadAttendance.find(
+        item => Number(item.user_id) === Number(selectedUstadAttendanceUser)
+      );
+      ustadAttendanceStatus = existing?.status || "hadir";
+    }
+  }
+
+  async function saveUstadAttendance() {
+    if (!isAdmin) {
+      showToast("Hanya admin yang dapat mengisi absensi ustad.", true);
+      return;
+    }
+
+    if (!selectedUstadAttendanceUser) {
+      showToast("Pilih ustad terlebih dahulu.", true);
+      return;
+    }
+
+    if (!attendanceDate) {
+      showToast("Tanggal absensi wajib dipilih.", true);
+      return;
+    }
+
+    savingUstadAttendance = true;
+
+    try {
+      const userId = Number(selectedUstadAttendanceUser);
+
+      const { error } = await supabase
+        .from("attendance_ustad")
+        .upsert(
+          {
+            user_id: userId,
+            date: attendanceDate,
+            status: ustadAttendanceStatus
+          },
+          { onConflict: "user_id,date" }
+        );
+
+      if (error) throw error;
+
+      showToast("✓ Absensi ustad berhasil disimpan.");
+      await loadUstadAttendance();
+      await loadUstadMonthlyReport();
+    } catch (e: any) {
+      showToast(
+        "Gagal menyimpan absensi ustad: " + (e?.message || "Kesalahan"),
+        true
+      );
+    } finally {
+      savingUstadAttendance = false;
+    }
+  }
+
+  async function loadUstadMonthlyReport() {
+    if (!isAdmin) return;
+
+    loadingUstadReport = true;
+
+    try {
+      const month = String(ustadReportMonth).padStart(2, "0");
+      const startDate = `${ustadReportYear}-${month}-01`;
+      const lastDay = new Date(ustadReportYear, ustadReportMonth, 0).getDate();
+      const endDate = `${ustadReportYear}-${month}-${String(lastDay).padStart(2, "0")}`;
+
+      const { data, error } = await supabase
+        .from("attendance_ustad")
+        .select("*")
+        .gte("date", startDate)
+        .lte("date", endDate)
+        .order("date", { ascending: true })
+        .order("user_id", { ascending: true });
+
+      if (error) throw error;
+      ustadReportData = (data || []) as Attendance[];
+    } catch (e: any) {
+      showToast(
+        "Gagal memuat laporan ustad: " + (e?.message || "Kesalahan"),
+        true
+      );
+      ustadReportData = [];
+    } finally {
+      loadingUstadReport = false;
+    }
+  }
+
+  function getUstadMonthlyStatus(userId: number, status: Attendance["status"]) {
+    return ustadReportData.filter(
+      item => Number(item.user_id) === userId && item.status === status
+    ).length;
+  }
+
+  function getUstadMonthlyTotal(userId: number) {
+    return ustadReportData.filter(
+      item => Number(item.user_id) === userId
+    ).length;
+  }
+
+  function getUstadAttendanceForDate(userId: number) {
+    return ustadAttendance.find(
+      item => Number(item.user_id) === userId
+    );
+  }
+
+  $: filteredUstadAttendanceUsers = ustadUsers.filter(user => {
+    const keyword = ustadAttendanceSearch.trim().toLowerCase();
+    if (!keyword) return true;
+
+    return [
+      user.id?.toString() || "",
+      user.full_name || "",
+      user.username || "",
+      user.email || ""
+    ].some(value => value.toLowerCase().includes(keyword));
+  });
+
+  function exportUstadMonthlyReport() {
+    if (!isAdmin) {
+      showToast("Hanya admin yang dapat mengekspor laporan.", true);
+      return;
+    }
+
+    const rows = ustadUsers.map((ustad, index) => ({
+      No: index + 1,
+      "ID Ustad": ustad.id,
+      "Nama Ustad": ustad.full_name || "",
+      Username: ustad.username || "",
+      Hadir: getUstadMonthlyStatus(ustad.id, "hadir"),
+      Izin: getUstadMonthlyStatus(ustad.id, "izin"),
+      Sakit: getUstadMonthlyStatus(ustad.id, "sakit"),
+      Alpha: getUstadMonthlyStatus(ustad.id, "alpha"),
+      Total: getUstadMonthlyTotal(ustad.id)
+    }));
+
+    if (!rows.length) {
+      showToast("Tidak ada data ustad untuk diekspor.", true);
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    worksheet["!cols"] = [
+      { wch: 5 }, { wch: 12 }, { wch: 30 }, { wch: 20 },
+      { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Absensi Ustad");
+
+    const monthName = new Date(ustadReportYear, ustadReportMonth - 1).toLocaleDateString(
+      "id-ID", { month: "long" }
+    );
+
+    XLSX.writeFile(
+      workbook,
+      `Laporan_Absensi_Ustad_${monthName}_${ustadReportYear}.xlsx`
+    );
+
+    showToast("✓ Laporan absensi ustad berhasil diekspor.");
+  }
 
   /* =========================
      QR SCANNER
@@ -3436,453 +3619,255 @@ async function deleteUser(
 
       {:else if activeView === "attendance"}
 
-        <div
-          class="bca-card sub-view-container"
-        >
+        <div class="bca-card sub-view-container">
 
-          <div
-            class="sub-header-row"
-          >
-
+          <div class="sub-header-row">
             <div>
-
-              <h3>
-                📅 Absensi Santri
-              </h3>
-
-              <p
-                class="sub-description"
-              >
-                Lihat absensi santri
-                berdasarkan tanggal.
+              <h3>📅 {attendanceMode === "ustad" ? "Absensi Ustad" : "Absensi Santri"}</h3>
+              <p class="sub-description">
+                {attendanceMode === "ustad"
+                  ? "Admin mencatat absensi ustad berdasarkan tanggal."
+                  : "Lihat dan input absensi santri berdasarkan tanggal."}
               </p>
 
+              <div class="attendance-section-buttons" style="margin-top:14px">
+                <button
+                  type="button"
+                  class:active={attendanceMode === "santri"}
+                  on:click={async () => {
+                    attendanceMode = "santri";
+                    selectedAttendanceUser = "";
+                    await loadAttendance();
+                  }}
+                >Absensi Santri</button>
+
+                {#if isAdmin}
+                  <button
+                    type="button"
+                    class:active={attendanceMode === "ustad"}
+                    on:click={async () => {
+                      attendanceMode = "ustad";
+                      selectedUstadAttendanceUser = "";
+                      ustadAttendanceStatus = "hadir";
+                      await loadUstadAttendance();
+                      await loadUstadMonthlyReport();
+                    }}
+                  >Absensi Ustad</button>
+                {/if}
+              </div>
             </div>
 
             <div class="action-group-top">
+              {#if attendanceMode === "santri"}
+                <button class="btn-primary" on:click={exportAttendanceToExcel}>📊 Export Excel</button>
+              {:else}
+                <button class="btn-primary" on:click={exportUstadMonthlyReport}>📊 Export Laporan Ustad</button>
+              {/if}
 
-              <button
-                class="btn-primary"
-                on:click={exportAttendanceToExcel}
-              >
-                📊 Export Excel
-              </button>
+              <button class="btn-back" on:click={() => changeView("home")}>← Kembali</button>
+            </div>
+          </div>
 
-              <button
-                class="btn-back"
-                on:click={() =>
-                  changeView("home")}
-              >
-                ← Kembali
-              </button>
+          <div class="attendance-date-box">
+            <label>Pilih Tanggal</label>
+            <input type="date" bind:value={attendanceDate} on:change={changeAttendanceDate} />
+          </div>
 
+          {#if attendanceMode === "santri"}
+
+            {#if isAdmin}
+              <div class="attendance-form">
+                <div class="attendance-section-filter">
+                  <div class="attendance-section-label">Jenjang Absensi</div>
+
+                  <div class="attendance-section-buttons">
+                    <button type="button" class:active={attendanceSection === "SD"} on:click={() => { attendanceSection = "SD"; attendanceSmpClass = ""; attendanceClassFilter = "SD"; selectedAttendanceUser = ""; }}>🏫 SD</button>
+                    <button type="button" class:active={attendanceSection === "SMP"} on:click={() => { attendanceSection = "SMP"; attendanceSmpClass = ""; attendanceClassFilter = "SMP"; selectedAttendanceUser = ""; }}>🎓 SMP</button>
+                    <button type="button" class:active={attendanceSection === "SMA"} on:click={() => { attendanceSection = "SMA"; attendanceSmpClass = ""; attendanceClassFilter = "SMA"; selectedAttendanceUser = ""; }}>🎓 SMA</button>
+                  </div>
+
+                  {#if attendanceSection === "SMP"}
+                    <div class="attendance-smp-classes">
+                      <div class="attendance-smp-title">Kelas SMP</div>
+                      <div class="attendance-smp-buttons">
+                        {#each ["1", "2", "3"] as kelas}
+                          <button type="button" class:active={attendanceSmpClass === kelas} on:click={() => { attendanceSmpClass = kelas; attendanceClassFilter = "SMP"; selectedAttendanceUser = ""; }}>Kelas {kelas}</button>
+                        {/each}
+                        <button type="button" class:active={attendanceSmpClass === ""} on:click={() => { attendanceSmpClass = ""; attendanceClassFilter = "SMP"; selectedAttendanceUser = ""; }}>Semua SMP</button>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+
+                <input class="attendance-search" type="search" placeholder="🔎 Cari nama/username santri..." bind:value={attendanceSearch} on:input={() => selectedAttendanceUser = ""} />
+
+                <select bind:value={selectedAttendanceUser}>
+                  <option value="">-- Pilih Santri ({filteredAttendanceSantri.length}) --</option>
+                  {#each filteredAttendanceSantri as santri}
+                    <option value={santri.id}>
+                      {santri.full_name || santri.username}
+                      {santri.full_name && santri.username !== santri.full_name ? ` (@${santri.username})` : ""}
+                      {santri.class_name ? ` — ${santri.class_name}` : ""}
+                    </option>
+                  {/each}
+                </select>
+
+                <select bind:value={attendanceStatus}>
+                  <option value="hadir">Hadir</option>
+                  <option value="izin">Izin</option>
+                  <option value="sakit">Sakit</option>
+                  <option value="alpha">Alpha</option>
+                </select>
+
+                <button class="btn-primary" on:click={saveAttendance}>✓ Simpan Absensi Santri</button>
+              </div>
+            {/if}
+
+            <div class="attendance-summary">
+              {#each ["hadir", "izin", "sakit", "alpha"] as status}
+                <div class="attendance-summary-item">
+                  <strong>{filteredAttendanceSantri.filter(santri => getAttendance(santri.id)?.status === status).length}</strong>
+                  <span>{attendanceLabel(status)}</span>
+                </div>
+              {/each}
             </div>
 
-          </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead><tr><th>Nama Santri</th><th>Kelas</th><th>Status</th><th>Tanggal</th></tr></thead>
+                <tbody>
+                  {#if filteredAttendanceSantri.length === 0}
+                    <tr><td colspan="4" class="empty-cell">Tidak ada santri pada jenjang {attendanceSection}.</td></tr>
+                  {:else}
+                    {#each filteredAttendanceSantri as santri}
+                      {@const attendance = getAttendance(santri.id)}
+                      <tr>
+                        <td><strong>{santri.full_name || santri.username}</strong><br /><small>@{santri.username}</small></td>
+                        <td>{santri.class_name || "-"}</td>
+                        <td>
+                          {#if attendance}
+                            <span class="attendance-badge {attendance.status}">{attendanceLabel(attendance.status)}</span>
+                          {:else}
+                            <span class="attendance-badge belum">Belum diisi</span>
+                          {/if}
+                        </td>
+                        <td>{attendanceDate}</td>
+                      </tr>
+                    {/each}
+                  {/if}
+                </tbody>
+              </table>
+            </div>
 
+          {:else}
 
-          <div
-            class="attendance-date-box"
-          >
-
-            <label>
-              Pilih Tanggal
-            </label>
-
-
-            <input
-              type="date"
-              bind:value={
-                attendanceDate
-              }
-              on:change={
-                changeAttendanceDate
-              }
-            />
-
-          </div>
-
-
-          {#if isAdmin}
-
-            <div
-              class="attendance-form"
-            >
-
-              <div class="attendance-section-filter">
-                <div class="attendance-section-label">
-                  Jenjang Absensi
+            {#if isAdmin}
+              <div class="attendance-form ustad-attendance-form">
+                <div class="attendance-section-filter">
+                  <div class="attendance-section-label">👨‍🏫 Input Absensi Ustad</div>
+                  <p class="sub-description">Hanya admin yang dapat mencatat atau mengubah absensi ustad.</p>
                 </div>
 
-                <div class="attendance-section-buttons">
-                  <button
-                    type="button"
-                    class:active={attendanceSection === "SD"}
-                    on:click={() => {
-                      attendanceSection = "SD";
-                      attendanceSmpClass = "";
-                      attendanceClassFilter = "SD";
-                      selectedAttendanceUser = "";
-                    }}
-                  >
-                    🏫 SD
-                  </button>
+                <input class="attendance-search" type="search" placeholder="🔎 Cari nama / username ustad..." bind:value={ustadAttendanceSearch} />
 
-                  <button
-                    type="button"
-                    class:active={attendanceSection === "SMP"}
-                    on:click={() => {
-                      attendanceSection = "SMP";
-                      attendanceSmpClass = "";
-                      attendanceClassFilter = "SMP";
-                      selectedAttendanceUser = "";
-                    }}
-                  >
-                    🎓 SMP
-                  </button>
+                <select bind:value={selectedUstadAttendanceUser} on:change={() => { const existing = getUstadAttendanceForDate(Number(selectedUstadAttendanceUser)); ustadAttendanceStatus = existing?.status || "hadir"; }}>
+                  <option value="">-- Pilih Ustad ({filteredUstadAttendanceUsers.length}) --</option>
+                  {#each filteredUstadAttendanceUsers as ustad}
+                    <option value={ustad.id}>
+                      {ustad.full_name || ustad.username}
+                      {ustad.full_name && ustad.username !== ustad.full_name ? ` (@${ustad.username})` : ""}
+                    </option>
+                  {/each}
+                </select>
 
-                  <button
-                    type="button"
-                    class:active={attendanceSection === "SMA"}
-                    on:click={() => {
-                      attendanceSection = "SMA";
-                      attendanceSmpClass = "";
-                      attendanceClassFilter = "SMA";
-                      selectedAttendanceUser = "";
-                    }}
-                  >
-                    🎓 SMA
-                  </button>
+                <select bind:value={ustadAttendanceStatus}>
+                  <option value="hadir">Hadir</option>
+                  <option value="izin">Izin</option>
+                  <option value="sakit">Sakit</option>
+                  <option value="alpha">Alpha</option>
+                </select>
+
+                <button class="btn-primary" disabled={savingUstadAttendance} on:click={saveUstadAttendance}>
+                  {savingUstadAttendance ? "Menyimpan..." : "✓ Simpan Absensi Ustad"}
+                </button>
+              </div>
+
+              <div class="attendance-summary">
+                {#each ["hadir", "izin", "sakit", "alpha"] as status}
+                  <div class="attendance-summary-item">
+                    <strong>{ustadAttendance.filter(item => item.status === status).length}</strong>
+                    <span>{attendanceLabel(status)}</span>
+                  </div>
+                {/each}
+              </div>
+
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead><tr><th>Nama Ustad</th><th>Status</th><th>Tanggal</th></tr></thead>
+                  <tbody>
+                    {#if filteredUstadAttendanceUsers.length === 0}
+                      <tr><td colspan="3" class="empty-cell">Belum ada user dengan role ustad.</td></tr>
+                    {:else}
+                      {#each filteredUstadAttendanceUsers as ustad}
+                        {@const attendance = getUstadAttendanceForDate(ustad.id)}
+                        <tr>
+                          <td><strong>{ustad.full_name || ustad.username}</strong><br /><small>@{ustad.username}</small></td>
+                          <td>
+                            {#if attendance}
+                              <span class="attendance-badge {attendance.status}">{attendanceLabel(attendance.status)}</span>
+                            {:else}
+                              <span class="attendance-badge belum">Belum diisi</span>
+                            {/if}
+                          </td>
+                          <td>{attendanceDate}</td>
+                        </tr>
+                      {/each}
+                    {/if}
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="bca-card ustad-monthly-report">
+                <div class="sub-header-row">
+                  <div>
+                    <h3>📊 Laporan Absensi Ustad Per Bulan</h3>
+                    <p class="sub-description">Rekap Hadir, Izin, Sakit, dan Alpha setiap ustad.</p>
+                  </div>
+                  <button class="btn-primary" on:click={exportUstadMonthlyReport}>📊 Export Excel</button>
                 </div>
 
-                {#if attendanceSection === "SMP"}
-                  <div class="attendance-smp-classes">
-                    <div class="attendance-smp-title">
-                      Kelas SMP
-                    </div>
+                <div class="attendance-month-filter">
+                  <div><label>Tahun</label><select bind:value={ustadReportYear} on:change={loadUstadMonthlyReport}>{#each Array(5) as _, index}<option value={new Date().getFullYear() - 2 + index}>{new Date().getFullYear() - 2 + index}</option>{/each}</select></div>
+                  <div><label>Bulan</label><select bind:value={ustadReportMonth} on:change={loadUstadMonthlyReport}>
+                    <option value={1}>Januari</option><option value={2}>Februari</option><option value={3}>Maret</option><option value={4}>April</option><option value={5}>Mei</option><option value={6}>Juni</option><option value={7}>Juli</option><option value={8}>Agustus</option><option value={9}>September</option><option value={10}>Oktober</option><option value={11}>November</option><option value={12}>Desember</option>
+                  </select></div>
+                </div>
 
-                    <div class="attendance-smp-buttons">
-                      <button
-                        type="button"
-                        class:active={attendanceSmpClass === "1"}
-                        on:click={() => {
-                          attendanceSmpClass = "1";
-                          attendanceClassFilter = "SMP";
-                          selectedAttendanceUser = "";
-                        }}
-                      >
-                        Kelas 1
-                      </button>
-
-                      <button
-                        type="button"
-                        class:active={attendanceSmpClass === "2"}
-                        on:click={() => {
-                          attendanceSmpClass = "2";
-                          attendanceClassFilter = "SMP";
-                          selectedAttendanceUser = "";
-                        }}
-                      >
-                        Kelas 2
-                      </button>
-
-                      <button
-                        type="button"
-                        class:active={attendanceSmpClass === "3"}
-                        on:click={() => {
-                          attendanceSmpClass = "3";
-                          attendanceClassFilter = "SMP";
-                          selectedAttendanceUser = "";
-                        }}
-                      >
-                        Kelas 3
-                      </button>
-
-                      <button
-                        type="button"
-                        class:clear={attendanceSmpClass === ""}
-                        on:click={() => {
-                          attendanceSmpClass = "";
-                          attendanceClassFilter = "SMP";
-                          selectedAttendanceUser = "";
-                        }}
-                      >
-                        Semua SMP
-                      </button>
-                    </div>
+                {#if loadingUstadReport}
+                  <div class="empty-cell">⏳ Memuat laporan...</div>
+                {:else}
+                  <div class="table-responsive">
+                    <table class="data-table">
+                      <thead><tr><th>No</th><th>Nama Ustad</th><th>Username</th><th>Hadir</th><th>Izin</th><th>Sakit</th><th>Alpha</th><th>Total</th></tr></thead>
+                      <tbody>
+                        {#if ustadUsers.length === 0}
+                          <tr><td colspan="8" class="empty-cell">Belum ada user dengan role ustad.</td></tr>
+                        {:else}
+                          {#each ustadUsers as ustad, index}
+                            <tr>
+                              <td>{index + 1}</td><td><strong>{ustad.full_name || "-"}</strong></td><td>@{ustad.username}</td>
+                              <td>{getUstadMonthlyStatus(ustad.id, "hadir")}</td><td>{getUstadMonthlyStatus(ustad.id, "izin")}</td><td>{getUstadMonthlyStatus(ustad.id, "sakit")}</td><td>{getUstadMonthlyStatus(ustad.id, "alpha")}</td><td><strong>{getUstadMonthlyTotal(ustad.id)}</strong></td>
+                            </tr>
+                          {/each}
+                        {/if}
+                      </tbody>
+                    </table>
                   </div>
                 {/if}
               </div>
-
-              <input
-                class="attendance-search"
-                type="search"
-                placeholder="🔎 Cari nama/username santri..."
-                bind:value={attendanceSearch}
-                on:input={() => {
-                  selectedAttendanceUser = "";
-                }}
-              />
-
-              <select
-                bind:value={selectedAttendanceUser}
-              >
-
-                <option value="">
-                  -- Pilih Santri ({filteredAttendanceSantri.length}) --
-                </option>
-
-                {#each filteredAttendanceSantri as santri}
-                  <option value={santri.id}>
-                    {santri.full_name || santri.username}
-                    {santri.full_name && santri.username !== santri.full_name ? ` (@${santri.username})` : ""}
-                    {santri.class_name ? ` — ${santri.class_name}` : ""}
-                  </option>
-                {/each}
-
-              </select>
-
-
-              <select
-                bind:value={
-                  attendanceStatus
-                }
-              >
-
-                <option value="hadir">
-                  Hadir
-                </option>
-
-                <option value="izin">
-                  Izin
-                </option>
-
-                <option value="sakit">
-                  Sakit
-                </option>
-
-                <option value="alpha">
-                  Alpha
-                </option>
-
-              </select>
-
-
-              <button
-                class="btn-primary"
-                on:click={
-                  saveAttendance
-                }
-              >
-                ✓ Simpan Absensi
-              </button>
-
-            </div>
+            {/if}
 
           {/if}
-
-
-          <div
-            class="attendance-summary"
-          >
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  filteredAttendanceSantri.filter(
-                    santri => getAttendance(santri.id)?.status === "hadir"
-                  ).length
-                }
-              </strong>
-
-              <span>
-                Hadir
-              </span>
-
-            </div>
-
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  filteredAttendanceSantri.filter(
-                    santri => getAttendance(santri.id)?.status === "izin"
-                  ).length
-                }
-              </strong>
-
-              <span>
-                Izin
-              </span>
-
-            </div>
-
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  filteredAttendanceSantri.filter(
-                    santri => getAttendance(santri.id)?.status === "sakit"
-                  ).length
-                }
-              </strong>
-
-              <span>
-                Sakit
-              </span>
-
-            </div>
-
-
-            <div
-              class="attendance-summary-item"
-            >
-
-              <strong>
-                {
-                  filteredAttendanceSantri.filter(
-                    santri => getAttendance(santri.id)?.status === "alpha"
-                  ).length
-                }
-              </strong>
-
-              <span>
-                Alpha
-              </span>
-
-            </div>
-
-          </div>
-
-
-          <div
-            class="table-responsive"
-          >
-
-            <table
-              class="data-table"
-            >
-
-              <thead>
-
-                <tr>
-
-                  <th>
-                    Nama Santri
-                  </th>
-
-                  <th>
-                    Status
-                  </th>
-
-                  <th>
-                    Tanggal
-                  </th>
-
-                </tr>
-
-              </thead>
-
-
-              <tbody>
-
-                {#if filteredAttendanceSantri.length === 0}
-                  <tr>
-                    <td colspan="3" class="empty-cell">
-                      Tidak ada santri pada jenjang {attendanceSection}{attendanceSection === "SMP" && attendanceSmpClass ? ` Kelas ${attendanceSmpClass}` : ""}.
-                    </td>
-                  </tr>
-                {:else}
-                  {#each filteredAttendanceSantri as santri}
-
-                  {@const attendance =
-                    getAttendance(
-                      santri.id
-                    )}
-
-
-                  <tr>
-
-                    <td>
-
-                      <div
-                        class="user-cell"
-                      >
-
-                        <span
-                          class="user-avatar"
-                        >
-
-                          {
-                            santri.username
-                              .charAt(0)
-                              .toUpperCase()
-                          }
-
-                        </span>
-
-
-                        <strong>
-                          {santri.username}
-                        </strong>
-
-                      </div>
-
-                    </td>
-
-
-                    <td>
-
-                      {#if attendance}
-
-                        <span
-                          class="attendance-badge {attendance.status}"
-                        >
-
-                          {
-                            attendanceLabel(
-                              attendance.status
-                            )
-                          }
-
-                        </span>
-
-                      {:else}
-
-                        <span
-                          class="attendance-badge belum"
-                        >
-                          Belum diisi
-                        </span>
-
-                      {/if}
-
-                    </td>
-
-
-                    <td>
-                      {attendanceDate}
-                    </td>
-
-                  </tr>
-
-                  {/each}
-                {/if}
-
-              </tbody>
-
-            </table>
-
-          </div>
 
         </div>
 
@@ -8733,4 +8718,53 @@ async function deleteUser(
     .santri-report-table { min-width: 560px; font-size: 12px; }
   }
 
+
+
+  /* =========================
+     ABSENSI USTAD
+  ========================= */
+  .ustad-attendance-form {
+    margin-top: 18px;
+  }
+
+  .ustad-attendance-form select,
+  .ustad-attendance-form input {
+    width: 100%;
+    margin-bottom: 12px;
+  }
+
+  .attendance-month-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin: 18px 0;
+    padding: 16px;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    background: #f8fafc;
+  }
+
+  .attendance-month-filter > div {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .attendance-month-filter label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #475569;
+  }
+
+  .attendance-month-filter select {
+    min-width: 150px;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #fff;
+  }
+
+  .ustad-monthly-report {
+    margin-top: 22px;
+  }
 </style>
