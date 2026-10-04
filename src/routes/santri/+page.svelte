@@ -526,6 +526,57 @@
   .ttd{width:220px}.ttd-space{height:70px}
   .print-btn{position:fixed;top:15px;right:15px;padding:10px 14px;cursor:pointer}
   @media print{.print-btn{display:none}body{margin:15mm}}
+
+  /* ===== FULL SCREEN / NO WHITE EDGES ===== */
+  :global(html),
+  :global(body),
+  :global(#svelte) {
+    width: 100%;
+    min-width: 100%;
+    min-height: 100%;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  :global(html) {
+    background: #edf1f8;
+    overflow-x: hidden;
+  }
+
+  :global(body) {
+    background: #edf1f8;
+    overflow-x: hidden;
+  }
+
+  :global(*) {
+    box-sizing: border-box;
+  }
+
+  .mybca-app {
+    width: 100%;
+    min-width: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+    margin: 0;
+    padding-top: 0;
+    overflow-x: hidden;
+  }
+
+  .app-header {
+    width: 100%;
+  }
+
+  .app-body {
+    width: 100%;
+  }
+
+  @media (max-width: 599px) {
+    .mybca-app {
+      width: 100%;
+      min-height: 100dvh;
+    }
+  }
+
 </style></head><body>
 <button class="print-btn" onclick="window.print()">Cetak / Simpan PDF</button>
 <div class="kop"><h1>DAARULHIKAM</h1><h2>RAPORT HASIL BELAJAR SANTRI</h2><p>${semesterLabel} | Tahun Pelajaran ${escapeHtml(tahunAjaran)}</p></div>
@@ -2637,4 +2688,92 @@
     .banner-content p { font-size: 0.76rem; }
     .total-bar { text-align: left; }
   }
+
+  /* ===== FINAL FULL VIEWPORT RESPONSIVE FIX ===== */
+  :global(html),
+  :global(body),
+  :global(#svelte) {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    height: 100% !important;
+    min-height: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  :global(html),
+  :global(body) {
+    background: #edf1f8 !important;
+  }
+
+  .mybca-app {
+    display: block !important;
+    width: 100vw !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    min-height: 100vh !important;
+    min-height: 100dvh !important;
+    margin: 0 !important;
+    padding-top: 0 !important;
+    overflow-x: hidden !important;
+  }
+
+  .app-header,
+  .app-body {
+    width: 100% !important;
+    max-width: none;
+  }
+
+  .header-container {
+    width: 100%;
+    max-width: 1180px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  /* HP: benar-benar penuh sampai tepi viewport */
+  @media (max-width: 599px) {
+    .mybca-app {
+      width: 100vw !important;
+      min-height: 100dvh !important;
+    }
+
+    .app-header {
+      width: 100vw !important;
+      border-radius: 0 0 24px 24px;
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
+    .header-container {
+      max-width: none;
+      width: 100%;
+    }
+
+    .app-body {
+      width: 100%;
+      max-width: none;
+      margin-left: 0;
+      margin-right: 0;
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+  }
+
+  /* Tablet/desktop tetap responsive tanpa melebar keluar layar */
+  @media (min-width: 600px) {
+    .app-header {
+      width: 100%;
+    }
+
+    .app-body {
+      width: 100%;
+      max-width: 1180px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+  }
+
 </style>
