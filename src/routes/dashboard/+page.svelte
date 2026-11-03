@@ -1,4 +1,5 @@
 
+
 <script lang="ts">
   import { supabase } from "$lib/supabaseClient";
   import { onMount, tick } from "svelte";
@@ -41,12 +42,28 @@ import * as XLSX from "xlsx";
     nama_kecamatan: string | null;
     hp_santri: string | null;
     nama_ayah: string | null;
+    tahun_ayah: number | null;
+    pendidikan_ayah: string | null;
+    pekerjaan_ayah: string | null;
+    penghasilan_ayah: string | null;
+    hp_ayah: string | null;
     nama_ibu: string | null;
+    tahun_ibu: number | null;
+    pendidikan_ibu: string | null;
+    pekerjaan_ibu: string | null;
+    penghasilan_ibu: string | null;
+    hp_ibu: string | null;
     nama_wali: string | null;
+    tahun_wali: number | null;
+    pendidikan_wali: string | null;
+    pekerjaan_wali: string | null;
+    penghasilan_wali: string | null;
     jurusan: string | null;
     created_at: string | null;
+    bukti_pembayaran: string | null;
+    kk_path: string | null;
+    ktp_path: string | null;
   }
-
   interface Entry {
     id: number;
     date: string;
@@ -209,6 +226,68 @@ import * as XLSX from "xlsx";
   let showPendaftaranDetail = false;
   let showPendaftaranEdit = false;
   let savingPendaftaran = false;
+
+  // Preview dokumen pendaftaran (bukti pembayaran, KK, dan KTP).
+  let previewDokumenUrl = "";
+  let previewDokumenTitle = "";
+
+  function openDokumenPreview(url: string | null, title: string) {
+    const value = (url || "").trim();
+    if (!value) {
+      showToast("Dokumen belum diunggah.", true);
+      return;
+    }
+    previewDokumenUrl = value;
+    previewDokumenTitle = title;
+  }
+
+  function closeDokumenPreview() {
+    previewDokumenUrl = "";
+    previewDokumenTitle = "";
+  }
+
+  // Unduh dokumen dari URL/path yang tersimpan pada kolom database.
+  async function downloadDokumen(url: string | null, title: string, namaSantri = "santri") {
+    const value = (url || "").trim();
+    if (!value) {
+      showToast("Dokumen belum diunggah.", true);
+      return;
+    }
+
+    try {
+      const response = await fetch(value);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const blob = await response.blob();
+      const extensionByType: Record<string, string> = {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "application/pdf": "pdf"
+      };
+      const urlPath = value.split("?")[0].split("#")[0];
+      const urlExtension = urlPath.match(/\.([a-zA-Z0-9]{2,5})$/)?.[1];
+      const extension = urlExtension || extensionByType[blob.type] || "file";
+      const safeName = `${title}-${namaSantri}`
+        .normalize("NFKD")
+        .replace(/[^a-zA-Z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .toLowerCase();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${safeName}.${extension}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (error) {
+      console.error("Gagal mengunduh dokumen pendaftaran:", error);
+      showToast("Dokumen gagal diunduh. Periksa URL dan izin akses Storage Supabase.", true);
+    }
+  }
+
   let pendaftaranForm: PendaftaranSantri = {
     id: 0,
     nama_santri: "",
@@ -225,10 +304,27 @@ import * as XLSX from "xlsx";
     nama_kecamatan: null,
     hp_santri: null,
     nama_ayah: null,
+    tahun_ayah: null,
+    pendidikan_ayah: null,
+    pekerjaan_ayah: null,
+    penghasilan_ayah: null,
+    hp_ayah: null,
     nama_ibu: null,
+    tahun_ibu: null,
+    pendidikan_ibu: null,
+    pekerjaan_ibu: null,
+    penghasilan_ibu: null,
+    hp_ibu: null,
     nama_wali: null,
+    tahun_wali: null,
+    pendidikan_wali: null,
+    pekerjaan_wali: null,
+    penghasilan_wali: null,
     jurusan: null,
-    created_at: null
+    created_at: null,
+    bukti_pembayaran: null,
+    kk_path: null,
+    ktp_path: null
   };
 
   $: filteredPendaftaranSantri = pendaftaranSantri.filter((item) => {
@@ -3605,6 +3701,12 @@ async function deleteUser(
                     {/if}
                   </div>
 
+                  <div class="registration-document-status">
+                    <span class:document-ready={!!pendaftar.bukti_pembayaran}>
+                      {pendaftar.bukti_pembayaran ? "✓ Bukti pembayaran tersedia" : "○ Bukti pembayaran belum ada"}
+                    </span>
+                  </div>
+
                   <div class="registration-card-summary">
                     <div><span>Nomor HP</span><strong>{pendaftar.hp_santri || "—"}</strong></div>
                     <div><span>Nama orang tua</span><strong>{pendaftar.nama_ayah || pendaftar.nama_ibu || pendaftar.nama_wali || "—"}</strong></div>
@@ -3645,8 +3747,22 @@ async function deleteUser(
                 </div>
                 <div class="registration-modal-section"><h4>Data Keluarga & Alamat</h4>
                   <div><span>Nama ayah</span><strong>{selectedPendaftar.nama_ayah || "—"}</strong></div>
+                  <div><span>Tahun lahir ayah</span><strong>{selectedPendaftar.tahun_ayah ?? "—"}</strong></div>
+                  <div><span>Pendidikan ayah</span><strong>{selectedPendaftar.pendidikan_ayah || "—"}</strong></div>
+                  <div><span>Pekerjaan ayah</span><strong>{selectedPendaftar.pekerjaan_ayah || "—"}</strong></div>
+                  <div><span>Penghasilan ayah</span><strong>{selectedPendaftar.penghasilan_ayah || "—"}</strong></div>
+                  <div><span>HP ayah</span><strong>{selectedPendaftar.hp_ayah || "—"}</strong></div>
                   <div><span>Nama ibu</span><strong>{selectedPendaftar.nama_ibu || "—"}</strong></div>
+                  <div><span>Tahun lahir ibu</span><strong>{selectedPendaftar.tahun_ibu ?? "—"}</strong></div>
+                  <div><span>Pendidikan ibu</span><strong>{selectedPendaftar.pendidikan_ibu || "—"}</strong></div>
+                  <div><span>Pekerjaan ibu</span><strong>{selectedPendaftar.pekerjaan_ibu || "—"}</strong></div>
+                  <div><span>Penghasilan ibu</span><strong>{selectedPendaftar.penghasilan_ibu || "—"}</strong></div>
+                  <div><span>HP ibu</span><strong>{selectedPendaftar.hp_ibu || "—"}</strong></div>
                   <div><span>Nama wali</span><strong>{selectedPendaftar.nama_wali || "—"}</strong></div>
+                  <div><span>Tahun lahir wali</span><strong>{selectedPendaftar.tahun_wali ?? "—"}</strong></div>
+                  <div><span>Pendidikan wali</span><strong>{selectedPendaftar.pendidikan_wali || "—"}</strong></div>
+                  <div><span>Pekerjaan wali</span><strong>{selectedPendaftar.pekerjaan_wali || "—"}</strong></div>
+                  <div><span>Penghasilan wali</span><strong>{selectedPendaftar.penghasilan_wali || "—"}</strong></div>
                   <div><span>Alamat</span><strong>{selectedPendaftar.alamat || "—"}</strong></div>
                   <div><span>RT / RW</span><strong>{selectedPendaftar.rt || "—"} / {selectedPendaftar.rw || "—"}</strong></div>
                   <div><span>Perumahan</span><strong>{selectedPendaftar.nama_perumahan || "—"}</strong></div>
@@ -3655,10 +3771,109 @@ async function deleteUser(
                   <div><span>Tanggal daftar</span><strong>{formatTanggalPendaftaran(selectedPendaftar.created_at)}</strong></div>
                 </div>
               </div>
+
+              <section class="registration-documents">
+                <div class="registration-documents-heading">
+                  <h4>📎 Dokumen Pendaftaran</h4>
+                  <p>Lihat gambar atau unduh dokumen ke perangkat Anda.</p>
+                </div>
+
+                <div class="registration-document-grid">
+                  <article class="registration-document-card">
+                    <div class="registration-document-title">
+                      <strong>💳 Bukti Pembayaran</strong>
+                      <span class:document-ready={!!selectedPendaftar.bukti_pembayaran}>
+                        {selectedPendaftar.bukti_pembayaran ? "Tersedia" : "Belum diunggah"}
+                      </span>
+                    </div>
+                    {#if selectedPendaftar.bukti_pembayaran}
+                      <button
+                        type="button"
+                        class="registration-document-preview"
+                        on:click={() => openDokumenPreview(selectedPendaftar?.bukti_pembayaran || null, "Bukti Pembayaran")}
+                        aria-label="Lihat bukti pembayaran"
+                      >
+                        <img src={selectedPendaftar.bukti_pembayaran} alt="Bukti pembayaran {selectedPendaftar.nama_santri}" loading="lazy" />
+                        <span>🔍 Lihat Gambar</span>
+                      </button>
+                      <button type="button" class="btn-secondary registration-document-download" on:click={() => downloadDokumen(selectedPendaftar?.bukti_pembayaran || null, "bukti-pembayaran", selectedPendaftar?.nama_santri || "santri")}>⬇ Unduh Bukti Pembayaran</button>
+                    {:else}
+                      <div class="registration-document-empty">Belum ada bukti pembayaran yang diunggah.</div>
+                    {/if}
+                  </article>
+
+                  <article class="registration-document-card">
+                    <div class="registration-document-title">
+                      <strong>🏠 Kartu Keluarga</strong>
+                      <span class:document-ready={!!selectedPendaftar.kk_path}>
+                        {selectedPendaftar.kk_path ? "Tersedia" : "Belum diunggah"}
+                      </span>
+                    </div>
+                    {#if selectedPendaftar.kk_path}
+                      <button
+                        type="button"
+                        class="registration-document-preview"
+                        on:click={() => openDokumenPreview(selectedPendaftar?.kk_path || null, "Foto Kartu Keluarga")}
+                        aria-label="Lihat foto kartu keluarga"
+                      >
+                        <img src={selectedPendaftar.kk_path} alt="Foto kartu keluarga {selectedPendaftar.nama_santri}" loading="lazy" />
+                        <span>🔍 Lihat Gambar</span>
+                      </button>
+                      <button type="button" class="btn-secondary registration-document-download" on:click={() => downloadDokumen(selectedPendaftar?.kk_path || null, "kartu-keluarga", selectedPendaftar?.nama_santri || "santri")}>⬇ Unduh KK</button>
+                    {:else}
+                      <div class="registration-document-empty">Foto kartu keluarga belum diunggah.</div>
+                    {/if}
+                  </article>
+
+                  <article class="registration-document-card">
+                    <div class="registration-document-title">
+                      <strong>🪪 KTP</strong>
+                      <span class:document-ready={!!selectedPendaftar.ktp_path}>
+                        {selectedPendaftar.ktp_path ? "Tersedia" : "Belum diunggah"}
+                      </span>
+                    </div>
+                    {#if selectedPendaftar.ktp_path}
+                      <button
+                        type="button"
+                        class="registration-document-preview"
+                        on:click={() => openDokumenPreview(selectedPendaftar?.ktp_path || null, "Foto KTP")}
+                        aria-label="Lihat foto KTP"
+                      >
+                        <img src={selectedPendaftar.ktp_path} alt="Foto KTP {selectedPendaftar.nama_santri}" loading="lazy" />
+                        <span>🔍 Lihat Gambar</span>
+                      </button>
+                      <button type="button" class="btn-secondary registration-document-download" on:click={() => downloadDokumen(selectedPendaftar?.ktp_path || null, "ktp", selectedPendaftar?.nama_santri || "santri")}>⬇ Unduh KTP</button>
+                    {:else}
+                      <div class="registration-document-empty">Foto KTP belum diunggah.</div>
+                    {/if}
+                  </article>
+                </div>
+              </section>
+
               <div class="registration-modal-actions">
                 <button class="btn-secondary" on:click={() => { showPendaftaranDetail = false; openPendaftaranEdit(selectedPendaftar!); }}>✎ Ubah Data</button>
                 <button class="btn-primary" on:click={() => showPendaftaranDetail = false}>Tutup</button>
               </div>
+            </div>
+          </div>
+        {/if}
+
+        {#if previewDokumenUrl}
+          <div
+            class="document-lightbox"
+            role="presentation"
+            on:click={(event) => { if (event.target === event.currentTarget) closeDokumenPreview(); }}
+          >
+            <div class="document-lightbox-content" role="dialog" aria-modal="true" aria-label={previewDokumenTitle}>
+              <div class="document-lightbox-header">
+                <strong>{previewDokumenTitle}</strong>
+                <div class="document-lightbox-actions">
+                  <a href={previewDokumenUrl} target="_blank" rel="noopener noreferrer">Buka tab baru ↗</a>
+                  <button type="button" class="btn-secondary registration-lightbox-download" on:click={() => downloadDokumen(previewDokumenUrl, previewDokumenTitle, selectedPendaftar?.nama_santri || "santri")}>⬇ Unduh</button>
+                  <button type="button" class="btn-close-modal" on:click={closeDokumenPreview}>✕</button>
+                </div>
+              </div>
+              <img src={previewDokumenUrl} alt={previewDokumenTitle} />
             </div>
           </div>
         {/if}
@@ -3677,17 +3892,37 @@ async function deleteUser(
                 <label>Jenis kelamin<input bind:value={pendaftaranForm.jenis_kelamin} /></label>
                 <label>NIK<input bind:value={pendaftaranForm.nik} /></label>
                 <label>NISN<input bind:value={pendaftaranForm.nisn} /></label>
-                <label>Nomor HP<input bind:value={pendaftaranForm.hp_santri} /></label>
+                <label>Nomor HP santri<input bind:value={pendaftaranForm.hp_santri} /></label>
                 <label>Jurusan<input bind:value={pendaftaranForm.jurusan} /></label>
-                <label>Nama ayah<input bind:value={pendaftaranForm.nama_ayah} /></label>
-                <label>Nama ibu<input bind:value={pendaftaranForm.nama_ibu} /></label>
-                <label>Nama wali<input bind:value={pendaftaranForm.nama_wali} /></label>
                 <label>RT<input bind:value={pendaftaranForm.rt} /></label>
                 <label>RW<input bind:value={pendaftaranForm.rw} /></label>
                 <label>Nama perumahan<input bind:value={pendaftaranForm.nama_perumahan} /></label>
                 <label>Kelurahan<input bind:value={pendaftaranForm.nama_kelurahan} /></label>
                 <label>Kecamatan<input bind:value={pendaftaranForm.nama_kecamatan} /></label>
                 <label class="registration-edit-wide">Alamat lengkap<textarea rows="3" bind:value={pendaftaranForm.alamat}></textarea></label>
+
+                <div class="registration-edit-wide"><h4>Data Ayah</h4></div>
+                <label>Nama ayah<input bind:value={pendaftaranForm.nama_ayah} /></label>
+                <label>Tahun lahir ayah<input type="number" bind:value={pendaftaranForm.tahun_ayah} /></label>
+                <label>Pendidikan ayah<input bind:value={pendaftaranForm.pendidikan_ayah} /></label>
+                <label>Pekerjaan ayah<input bind:value={pendaftaranForm.pekerjaan_ayah} /></label>
+                <label>Penghasilan ayah<input bind:value={pendaftaranForm.penghasilan_ayah} /></label>
+                <label>HP ayah<input bind:value={pendaftaranForm.hp_ayah} /></label>
+
+                <div class="registration-edit-wide"><h4>Data Ibu</h4></div>
+                <label>Nama ibu<input bind:value={pendaftaranForm.nama_ibu} /></label>
+                <label>Tahun lahir ibu<input type="number" bind:value={pendaftaranForm.tahun_ibu} /></label>
+                <label>Pendidikan ibu<input bind:value={pendaftaranForm.pendidikan_ibu} /></label>
+                <label>Pekerjaan ibu<input bind:value={pendaftaranForm.pekerjaan_ibu} /></label>
+                <label>Penghasilan ibu<input bind:value={pendaftaranForm.penghasilan_ibu} /></label>
+                <label>HP ibu<input bind:value={pendaftaranForm.hp_ibu} /></label>
+
+                <div class="registration-edit-wide"><h4>Data Wali</h4></div>
+                <label>Nama wali<input bind:value={pendaftaranForm.nama_wali} /></label>
+                <label>Tahun lahir wali<input type="number" bind:value={pendaftaranForm.tahun_wali} /></label>
+                <label>Pendidikan wali<input bind:value={pendaftaranForm.pendidikan_wali} /></label>
+                <label>Pekerjaan wali<input bind:value={pendaftaranForm.pekerjaan_wali} /></label>
+                <label>Penghasilan wali<input bind:value={pendaftaranForm.penghasilan_wali} /></label>
               </div>
               <div class="registration-modal-actions">
                 <button class="btn-back" disabled={savingPendaftaran} on:click={() => showPendaftaranEdit = false}>Batal</button>
@@ -5485,6 +5720,138 @@ async function deleteUser(
   .registration-edit-grid input, .registration-edit-grid textarea { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid #cbd5e1; border-radius: 9px; font: inherit; color: #1e293b; background: #fff; }
   .registration-edit-wide { grid-column: 1 / -1; }
   @media (max-width: 650px) { .registration-modal-grid, .registration-edit-grid { grid-template-columns: 1fr; } .registration-edit-wide { grid-column: auto; } }
+
+  /* ===== DOKUMEN PENDAFTARAN ===== */
+  .registration-document-status { margin-top: 12px; }
+  .registration-document-status span,
+  .registration-document-title span {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: #fff1f2;
+    color: #be123c;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .registration-document-status span.document-ready,
+  .registration-document-title span.document-ready {
+    background: #dcfce7;
+    color: #166534;
+  }
+  .registration-documents {
+    margin-top: 18px;
+    padding: 16px;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    background: #f8fafc;
+  }
+  .registration-documents-heading h4 { margin: 0; color: #172554; }
+  .registration-documents-heading p { margin: 5px 0 14px; color: #64748b; font-size: 12px; }
+  .registration-document-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .registration-document-card {
+    min-width: 0;
+    padding: 11px;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    background: #fff;
+  }
+  .registration-document-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 7px;
+    margin-bottom: 10px;
+  }
+  .registration-document-title strong { color: #1e293b; font-size: 12px; }
+  .registration-document-title span { font-size: 10px; }
+  .registration-document-preview {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 145px;
+    overflow: hidden;
+    padding: 0;
+    border: 1px solid #e2e8f0;
+    border-radius: 9px;
+    background: #f1f5f9;
+    cursor: zoom-in;
+  }
+  .registration-document-preview img {
+    display: block;
+    width: 100%;
+    height: 175px;
+    object-fit: contain;
+    background: #f1f5f9;
+  }
+  .registration-document-download { width: 100%; margin-top: 10px; justify-content: center; }
+  .registration-lightbox-download { white-space: nowrap; }
+  .registration-document-preview span {
+    display: block;
+    padding: 8px;
+    color: #1d4ed8;
+    background: #eff6ff;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .registration-document-empty {
+    display: grid;
+    min-height: 145px;
+    place-items: center;
+    padding: 14px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 9px;
+    color: #94a3b8;
+    background: #f8fafc;
+    font-size: 12px;
+    text-align: center;
+  }
+  .document-lightbox {
+    position: fixed;
+    z-index: 10050;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: rgba(15, 23, 42, .88);
+  }
+  .document-lightbox-content {
+    width: min(1000px, 96vw);
+    max-height: 94vh;
+    overflow: hidden;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 20px 60px rgba(0,0,0,.3);
+  }
+  .document-lightbox-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    color: #1e293b;
+  }
+  .document-lightbox-actions { display: flex; align-items: center; gap: 12px; }
+  .document-lightbox-actions a { color: #2563eb; font-size: 12px; font-weight: 700; text-decoration: none; }
+  .document-lightbox-content > img {
+    display: block;
+    width: 100%;
+    max-height: calc(94vh - 60px);
+    object-fit: contain;
+    background: #0f172a;
+  }
+  @media (max-width: 760px) {
+    .registration-document-grid { grid-template-columns: 1fr; }
+    .registration-document-preview img { height: 210px; }
+    .document-lightbox { padding: 8px; }
+    .document-lightbox-content { width: 100%; }
+    .document-lightbox-header { align-items: flex-start; }
+  }
 
   /* ===== FILTER JENJANG ABSENSI ===== */
   .attendance-section-filter {
