@@ -25,6 +25,28 @@ import * as XLSX from "xlsx";
     name: string;
   }
 
+  interface PendaftaranSantri {
+    id: number;
+    nama_santri: string;
+    tempat_lahir: string | null;
+    tanggal_lahir: string | null;
+    jenis_kelamin: string | null;
+    nik: string | null;
+    nisn: string | null;
+    alamat: string | null;
+    rt: string | null;
+    rw: string | null;
+    nama_perumahan: string | null;
+    nama_kelurahan: string | null;
+    nama_kecamatan: string | null;
+    hp_santri: string | null;
+    nama_ayah: string | null;
+    nama_ibu: string | null;
+    nama_wali: string | null;
+    jurusan: string | null;
+    created_at: string | null;
+  }
+
   interface Entry {
     id: number;
     date: string;
@@ -96,7 +118,8 @@ import * as XLSX from "xlsx";
     | "topup"
     | "pocket-expense"
     | "announcement"
-    | "santri-report";
+    | "santri-report"
+    | "pendaftaran";
 
   /* =========================
      MONTHS
@@ -177,6 +200,50 @@ import * as XLSX from "xlsx";
     items: schedules.filter(schedule => schedule.day === day)
   }));
   let announcements: Announcement[] = [];
+
+  // Data calon santri dari formulir pendaftaran.
+  let pendaftaranSantri: PendaftaranSantri[] = [];
+  let pendaftaranSearch = "";
+  let loadingPendaftaran = false;
+  let selectedPendaftar: PendaftaranSantri | null = null;
+  let showPendaftaranDetail = false;
+  let showPendaftaranEdit = false;
+  let savingPendaftaran = false;
+  let pendaftaranForm: PendaftaranSantri = {
+    id: 0,
+    nama_santri: "",
+    tempat_lahir: null,
+    tanggal_lahir: null,
+    jenis_kelamin: null,
+    nik: null,
+    nisn: null,
+    alamat: null,
+    rt: null,
+    rw: null,
+    nama_perumahan: null,
+    nama_kelurahan: null,
+    nama_kecamatan: null,
+    hp_santri: null,
+    nama_ayah: null,
+    nama_ibu: null,
+    nama_wali: null,
+    jurusan: null,
+    created_at: null
+  };
+
+  $: filteredPendaftaranSantri = pendaftaranSantri.filter((item) => {
+    const keyword = pendaftaranSearch.trim().toLowerCase();
+    if (!keyword) return true;
+    return [
+      item.nama_santri || "",
+      item.nik || "",
+      item.nisn || "",
+      item.jurusan || "",
+      item.nama_ayah || "",
+      item.nama_ibu || "",
+      item.nama_kecamatan || ""
+    ].some(value => value.toLowerCase().includes(keyword));
+  });
 
   let sppData: Record<number, SPPRecord> = {};
 
@@ -621,9 +688,6 @@ import * as XLSX from "xlsx";
     { class_name: "", subject: "None", subject2: "None", teacher_id: "", time: "" }
   ];
 
-  /* =========================
-     ANNOUNCEMENT
-  ========================= */
 
   let showAnnouncementModal = false;
 
@@ -688,7 +752,8 @@ import * as XLSX from "xlsx";
       loadSPPData(),
       loadAttendance(),
       loadSchedules(),
-      loadAnnouncements()
+      loadAnnouncements(),
+      loadPendaftaranSantri()
     ]);
   });
 
@@ -2075,6 +2140,98 @@ async function deleteUser(
   }
 
   /* =========================
+     LOAD PENDAFTARAN SANTRI
+  ========================= */
+
+  async function loadPendaftaranSantri() {
+    if (!isAdmin) return;
+
+    loadingPendaftaran = true;
+    try {
+      // Ambil seluruh baris secara bertahap agar tidak berhenti pada
+      // batas maksimum baris yang dikembalikan Supabase dalam satu query.
+      const seluruhData: PendaftaranSantri[] = [];
+      const ukuranHalaman = 1000;
+      let mulai = 0;
+
+      while (true) {
+        const { data, error } = await supabase
+          .from("pendaftaran_santri")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .range(mulai, mulai + ukuranHalaman - 1);
+
+        if (error) throw error;
+
+        const halaman = (data || []) as PendaftaranSantri[];
+        seluruhData.push(...halaman);
+
+        if (halaman.length < ukuranHalaman) break;
+        mulai += ukuranHalaman;
+      }
+
+      pendaftaranSantri = seluruhData;
+    } catch (error: any) {
+      console.error("Gagal memuat pendaftaran santri:", error);
+      showToast("Gagal memuat pendaftaran santri: " + (error?.message || "Terjadi kesalahan."), true);
+      pendaftaranSantri = [];
+    } finally {
+      loadingPendaftaran = false;
+    }
+  }
+
+  function openPendaftaranDetail(pendaftar: PendaftaranSantri) {
+    selectedPendaftar = pendaftar;
+    showPendaftaranDetail = true;
+  }
+
+  function openPendaftaranEdit(pendaftar: PendaftaranSantri) {
+    selectedPendaftar = pendaftar;
+    pendaftaranForm = { ...pendaftar };
+    showPendaftaranEdit = true;
+  }
+
+  async function savePendaftaranEdit() {
+    if (!isAdmin || !pendaftaranForm.id || savingPendaftaran) return;
+    if (!pendaftaranForm.nama_santri?.trim()) {
+      showToast("Nama santri wajib diisi.", true);
+      return;
+    }
+
+    savingPendaftaran = true;
+    try {
+      const { id, created_at, ...payload } = pendaftaranForm;
+      const { error } = await supabase
+        .from("pendaftaran_santri")
+        .update(payload)
+        .eq("id", id);
+      if (error) throw error;
+
+      pendaftaranSantri = pendaftaranSantri.map(item =>
+        item.id === id ? { ...item, ...payload, id, created_at } : item
+      );
+      selectedPendaftar = { ...pendaftaranForm };
+      showPendaftaranEdit = false;
+      showToast("✓ Data pendaftaran berhasil diperbarui.");
+    } catch (error: any) {
+      showToast("Gagal mengubah data pendaftaran: " + (error?.message || "Terjadi kesalahan."), true);
+    } finally {
+      savingPendaftaran = false;
+    }
+  }
+
+  function formatTanggalPendaftaran(value: string | null) {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+    return date.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "long",
+      year: "numeric"
+    });
+  }
+
+  /* =========================
      LOAD ANNOUNCEMENTS
   ========================= */
 
@@ -2764,6 +2921,17 @@ async function deleteUser(
       {/if}
 
 
+      {#if isAdmin}
+        <button
+          class:active={activeView === "pendaftaran"}
+          class="nav-item"
+          on:click={() => changeView("pendaftaran")}
+        >
+          📝
+          Pendaftaran Santri
+        </button>
+      {/if}
+
       <button
         class:active={
           activeView === "barcode"
@@ -3360,6 +3528,174 @@ async function deleteUser(
       <!-- =========================
            USER MANAGEMENT
       ========================= -->
+
+      {:else if activeView === "pendaftaran"}
+
+        <div class="bca-card sub-view-container registration-view">
+          <div class="sub-header-row">
+            <div>
+              <h3>📝 Data Pendaftaran Santri</h3>
+              <p class="sub-description">
+                Daftar calon santri yang masuk dari formulir pendaftaran.
+              </p>
+            </div>
+            <div class="action-group-top">
+              <button class="btn-primary" on:click={loadPendaftaranSantri} disabled={loadingPendaftaran}>
+                {loadingPendaftaran ? "Memuat..." : "↻ Refresh Data"}
+              </button>
+              <button class="btn-back" on:click={() => changeView("home")}>
+                ← Kembali
+              </button>
+            </div>
+          </div>
+
+          <div class="control-card-inline registration-toolbar">
+            <div class="search-box">
+              <span>🔍</span>
+              <input
+                type="text"
+                placeholder="Cari nama, NIK, NISN, jurusan, atau nama orang tua..."
+                bind:value={pendaftaranSearch}
+              />
+              {#if pendaftaranSearch}
+                <button
+                  type="button"
+                  class="search-clear-btn"
+                  title="Hapus pencarian"
+                  on:click={() => pendaftaranSearch = ""}
+                >✕</button>
+              {/if}
+            </div>
+            <div class="user-search-result-count">
+              Menampilkan <strong>{filteredPendaftaranSantri.length}</strong> dari
+              <strong>{pendaftaranSantri.length}</strong> pendaftar
+            </div>
+          </div>
+
+          {#if loadingPendaftaran}
+            <div class="registration-empty">⏳ Memuat data pendaftaran...</div>
+          {:else if filteredPendaftaranSantri.length === 0}
+            <div class="registration-empty">
+              {#if pendaftaranSearch}
+                Data pendaftaran dengan kata "{pendaftaranSearch}" tidak ditemukan.
+              {:else}
+                Belum ada data pendaftaran santri.
+              {/if}
+            </div>
+          {:else}
+            <div class="registration-card-grid">
+              {#each filteredPendaftaranSantri as pendaftar (pendaftar.id)}
+                <article class="registration-card">
+                  <div class="registration-card-heading">
+                    <div class="registration-avatar">
+                      {(pendaftar.nama_santri || "S").charAt(0).toUpperCase()}
+                    </div>
+                    <div class="registration-name-wrap">
+                      <h4>{pendaftar.nama_santri}</h4>
+                      <span class="registration-id">Pendaftar #{pendaftar.id}</span>
+                    </div>
+                  </div>
+
+                  <div class="registration-tags">
+                    {#if pendaftar.jurusan}
+                      <span class="registration-tag">📚 {pendaftar.jurusan}</span>
+                    {/if}
+                    {#if pendaftar.jenis_kelamin}
+                      <span class="registration-tag">👤 {pendaftar.jenis_kelamin}</span>
+                    {/if}
+                  </div>
+
+                  <div class="registration-card-summary">
+                    <div><span>Nomor HP</span><strong>{pendaftar.hp_santri || "—"}</strong></div>
+                    <div><span>Nama orang tua</span><strong>{pendaftar.nama_ayah || pendaftar.nama_ibu || pendaftar.nama_wali || "—"}</strong></div>
+                    <div><span>Kecamatan</span><strong>{pendaftar.nama_kecamatan || "—"}</strong></div>
+                  </div>
+
+                  <div class="registration-card-footer">
+                    <span>📅 Didaftarkan</span>
+                    <strong>{formatTanggalPendaftaran(pendaftar.created_at)}</strong>
+                  </div>
+                  <div class="registration-card-actions">
+                    <button type="button" class="btn-primary" on:click={() => openPendaftaranDetail(pendaftar)}>Lihat Data Lengkap</button>
+                    <button type="button" class="btn-secondary" on:click={() => openPendaftaranEdit(pendaftar)}>✎ Ubah Data</button>
+                  </div>
+                </article>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        {#if showPendaftaranDetail && selectedPendaftar}
+          <div class="modal-backdrop" role="presentation" on:click={(event) => { if (event.target === event.currentTarget) showPendaftaranDetail = false; }}>
+            <div class="modal-content registration-modal" role="dialog" aria-modal="true" aria-label="Detail pendaftaran santri">
+              <div class="modal-header">
+                <div><h3>📋 Data Lengkap Pendaftar</h3><p class="sub-description">{selectedPendaftar.nama_santri} · Pendaftar #{selectedPendaftar.id}</p></div>
+                <button class="btn-close-modal" on:click={() => showPendaftaranDetail = false}>✕</button>
+              </div>
+              <div class="registration-modal-grid">
+                <div class="registration-modal-section"><h4>Data Santri</h4>
+                  <div><span>Nama lengkap</span><strong>{selectedPendaftar.nama_santri || "—"}</strong></div>
+                  <div><span>Tempat lahir</span><strong>{selectedPendaftar.tempat_lahir || "—"}</strong></div>
+                  <div><span>Tanggal lahir</span><strong>{formatTanggalPendaftaran(selectedPendaftar.tanggal_lahir)}</strong></div>
+                  <div><span>Jenis kelamin</span><strong>{selectedPendaftar.jenis_kelamin || "—"}</strong></div>
+                  <div><span>NIK</span><strong>{selectedPendaftar.nik || "—"}</strong></div>
+                  <div><span>NISN</span><strong>{selectedPendaftar.nisn || "—"}</strong></div>
+                  <div><span>Nomor HP</span><strong>{selectedPendaftar.hp_santri || "—"}</strong></div>
+                  <div><span>Jurusan</span><strong>{selectedPendaftar.jurusan || "—"}</strong></div>
+                </div>
+                <div class="registration-modal-section"><h4>Data Keluarga & Alamat</h4>
+                  <div><span>Nama ayah</span><strong>{selectedPendaftar.nama_ayah || "—"}</strong></div>
+                  <div><span>Nama ibu</span><strong>{selectedPendaftar.nama_ibu || "—"}</strong></div>
+                  <div><span>Nama wali</span><strong>{selectedPendaftar.nama_wali || "—"}</strong></div>
+                  <div><span>Alamat</span><strong>{selectedPendaftar.alamat || "—"}</strong></div>
+                  <div><span>RT / RW</span><strong>{selectedPendaftar.rt || "—"} / {selectedPendaftar.rw || "—"}</strong></div>
+                  <div><span>Perumahan</span><strong>{selectedPendaftar.nama_perumahan || "—"}</strong></div>
+                  <div><span>Kelurahan</span><strong>{selectedPendaftar.nama_kelurahan || "—"}</strong></div>
+                  <div><span>Kecamatan</span><strong>{selectedPendaftar.nama_kecamatan || "—"}</strong></div>
+                  <div><span>Tanggal daftar</span><strong>{formatTanggalPendaftaran(selectedPendaftar.created_at)}</strong></div>
+                </div>
+              </div>
+              <div class="registration-modal-actions">
+                <button class="btn-secondary" on:click={() => { showPendaftaranDetail = false; openPendaftaranEdit(selectedPendaftar!); }}>✎ Ubah Data</button>
+                <button class="btn-primary" on:click={() => showPendaftaranDetail = false}>Tutup</button>
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        {#if showPendaftaranEdit}
+          <div class="modal-backdrop" role="presentation" on:click={(event) => { if (event.target === event.currentTarget) showPendaftaranEdit = false; }}>
+            <div class="modal-content registration-modal" role="dialog" aria-modal="true" aria-label="Ubah data pendaftaran santri">
+              <div class="modal-header">
+                <div><h3>✎ Ubah Data Pendaftar</h3><p class="sub-description">Perubahan akan disimpan ke database pendaftaran.</p></div>
+                <button class="btn-close-modal" on:click={() => showPendaftaranEdit = false}>✕</button>
+              </div>
+              <div class="registration-edit-grid">
+                <label>Nama santri<input bind:value={pendaftaranForm.nama_santri} /></label>
+                <label>Tempat lahir<input bind:value={pendaftaranForm.tempat_lahir} /></label>
+                <label>Tanggal lahir<input type="date" bind:value={pendaftaranForm.tanggal_lahir} /></label>
+                <label>Jenis kelamin<input bind:value={pendaftaranForm.jenis_kelamin} /></label>
+                <label>NIK<input bind:value={pendaftaranForm.nik} /></label>
+                <label>NISN<input bind:value={pendaftaranForm.nisn} /></label>
+                <label>Nomor HP<input bind:value={pendaftaranForm.hp_santri} /></label>
+                <label>Jurusan<input bind:value={pendaftaranForm.jurusan} /></label>
+                <label>Nama ayah<input bind:value={pendaftaranForm.nama_ayah} /></label>
+                <label>Nama ibu<input bind:value={pendaftaranForm.nama_ibu} /></label>
+                <label>Nama wali<input bind:value={pendaftaranForm.nama_wali} /></label>
+                <label>RT<input bind:value={pendaftaranForm.rt} /></label>
+                <label>RW<input bind:value={pendaftaranForm.rw} /></label>
+                <label>Nama perumahan<input bind:value={pendaftaranForm.nama_perumahan} /></label>
+                <label>Kelurahan<input bind:value={pendaftaranForm.nama_kelurahan} /></label>
+                <label>Kecamatan<input bind:value={pendaftaranForm.nama_kecamatan} /></label>
+                <label class="registration-edit-wide">Alamat lengkap<textarea rows="3" bind:value={pendaftaranForm.alamat}></textarea></label>
+              </div>
+              <div class="registration-modal-actions">
+                <button class="btn-back" disabled={savingPendaftaran} on:click={() => showPendaftaranEdit = false}>Batal</button>
+                <button class="btn-primary" disabled={savingPendaftaran} on:click={savePendaftaranEdit}>{savingPendaftaran ? "Menyimpan..." : "Simpan Perubahan"}</button>
+              </div>
+            </div>
+          </div>
+        {/if}
 
       {:else if activeView === "users"}
 
@@ -5010,6 +5346,145 @@ async function deleteUser(
 
 
 <style>
+
+  /* ===== PENDAFTARAN SANTRI ===== */
+  .registration-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 18px 0;
+  }
+
+  .registration-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr));
+    gap: 16px;
+    margin-top: 18px;
+  }
+
+  .registration-card {
+    min-width: 0;
+    padding: 18px;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    background: #fff;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+  }
+
+  .registration-card-heading {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .registration-avatar {
+    display: grid;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 14px;
+    background: #eaf2ff;
+    color: #2457a6;
+    font-size: 19px;
+    font-weight: 800;
+  }
+
+  .registration-name-wrap {
+    min-width: 0;
+  }
+
+  .registration-name-wrap h4 {
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+    color: #172554;
+    font-size: 16px;
+  }
+
+  .registration-id {
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .registration-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 14px 0;
+  }
+
+  .registration-tag {
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: #f1f5f9;
+    color: #334155;
+    font-size: 12px;
+  }
+
+  .registration-details {
+    display: grid;
+    gap: 12px;
+  }
+
+  .registration-details > div {
+    display: grid;
+    gap: 4px;
+  }
+
+  .registration-details span,
+  .registration-card-footer span {
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .registration-details strong,
+  .registration-card-footer strong {
+    color: #1e293b;
+    font-size: 13px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  .registration-card-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid #e2e8f0;
+  }
+
+  .registration-empty {
+    padding: 34px 16px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 14px;
+    color: #64748b;
+    text-align: center;
+  }
+
+  @media (max-width: 600px) {
+    .registration-card { padding: 15px; }
+    .registration-toolbar { align-items: stretch; }
+  }
+
+  .registration-card-summary { display: grid; gap: 10px; margin-top: 12px; }
+  .registration-card-summary > div, .registration-modal-section > div { display: grid; gap: 3px; }
+  .registration-card-summary span, .registration-modal-section span { color: #64748b; font-size: 12px; }
+  .registration-card-summary strong, .registration-modal-section strong { color: #1e293b; font-size: 13px; overflow-wrap: anywhere; }
+  .registration-card-actions, .registration-modal-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+  .registration-card-actions button { flex: 1 1 130px; }
+  .registration-modal { width: min(900px, calc(100vw - 28px)); max-height: 90vh; overflow-y: auto; }
+  .registration-modal-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .registration-modal-section { display: grid; align-content: start; gap: 12px; padding: 16px; border: 1px solid #e2e8f0; border-radius: 12px; }
+  .registration-modal-section h4 { margin: 0 0 4px; color: #172554; }
+  .registration-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+  .registration-edit-grid label { display: grid; gap: 6px; color: #334155; font-size: 13px; font-weight: 600; }
+  .registration-edit-grid input, .registration-edit-grid textarea { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid #cbd5e1; border-radius: 9px; font: inherit; color: #1e293b; background: #fff; }
+  .registration-edit-wide { grid-column: 1 / -1; }
+  @media (max-width: 650px) { .registration-modal-grid, .registration-edit-grid { grid-template-columns: 1fr; } .registration-edit-wide { grid-column: auto; } }
 
   /* ===== FILTER JENJANG ABSENSI ===== */
   .attendance-section-filter {
@@ -7865,68 +8340,33 @@ async function deleteUser(
   ========================= */
 
   .modal-backdrop {
-
-    position:
-      fixed;
-
-    inset:
-      0;
-
-    background:
-      rgba(
-        0,
-        0,
-        0,
-        0.5
-      );
-
-    display:
-      flex;
-
-    align-items:
-      center;
-
-    justify-content:
-      center;
-
-    padding:
-      20px;
-
-    z-index:
-      1000;
-
-  }
-
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 1000;
+}
 
   .modal-card {
+  width: 100%;
+  max-width: 430px;
+  background-color: #ffffff;
+  opacity: 1;
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+}
 
-    width:
-      100%;
-
-    max-width:
-      430px;
-
-    background:
-      white;
-
-    border-radius:
-      16px;
-
-    padding:
-      22px;
-
-    box-shadow:
-      0 20px 50px
-      rgba(
-        0,
-        0,
-        0,
-        0.2
-      );
-
-  }
-
-
+.modal-content,
+.registration-modal {
+  background-color: #ffffff !important;
+  opacity: 1 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
   .modal-header {
 
     display:
