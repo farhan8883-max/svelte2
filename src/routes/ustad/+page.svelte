@@ -70,11 +70,31 @@
     december: boolean;
   }
 
+  interface NgajiSession {
+    id: number;
+    nama_sesi: string;
+    tanggal: string;
+    waktu_mulai?: string | null;
+    waktu_selesai?: string | null;
+    status: "dibuka" | "ditutup";
+    keterangan?: string | null;
+  }
+
   interface Attendance {
     id?: number;
     user_id: number;
     date: string;
     status: "hadir" | "izin" | "sakit" | "alpha";
+  }
+
+  interface NgajiAttendanceRecord {
+    id: number;
+    session_id: number;
+    user_id: number;
+    tanggal: string;
+    status: "hadir" | "izin" | "sakit" | "alpha";
+    metode?: string | null;
+    created_at?: string;
   }
 
   type AttendanceStatus = Attendance["status"] | "";
@@ -107,6 +127,7 @@
     | "users"
     | "attendance"
     | "attendanceScan"
+    | "ngajiScan"
     | "schedule"
     | "grades"
     | "barcode"
@@ -292,6 +313,254 @@
   let qrScanMessage = "";
   let cameraError = "";
 
+  // ABSENSI NGAJI
+  let ngajiSessions: NgajiSession[] = [];
+  let selectedNgajiSessionId = "";
+  // Tanggal awal mengikuti tanggal lokal perangkat.
+  const getLocalDateValue = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+  let selectedNgajiDate = getLocalDateValue();
+  const DEFAULT_NGAJI_SESSIONS = [
+    { nama_sesi: "Subuh", waktu_mulai: "04:00", waktu_selesai: "05:30" },
+    { nama_sesi: "Dzuhur", waktu_mulai: "12:00", waktu_selesai: "13:00" },
+    { nama_sesi: "Ashar", waktu_mulai: "15:00", waktu_selesai: "16:00" },
+    { nama_sesi: "Maghrib", waktu_mulai: "18:00", waktu_selesai: "19:00" },
+    { nama_sesi: "Isya", waktu_mulai: "19:30", waktu_selesai: "20:30" }
+  ];
+  let ngajiAttendanceCount = 0;
+  let ngajiAttendanceRows: NgajiAttendanceRecord[] = [];
+  let ngajiAttendanceLoading = false;
+  let ngajiAttendanceError = "";
+  let ngajiAttendanceSearch = "";
+  let ngajiLastScannedStudent: User | null = null;
+  let ngajiScanMessage = "";
+
+  let ngajiSessionsLoading = false;
+
+  async function loadNgajiSessions() {
+    if (!selectedNgajiDate) selectedNgajiDate = getLocalDateValue();
+    ngajiSessionsLoading = true;
+
+    try {
+      // Ambil sesi yang sudah ada terlebih dahulu. Cara ini tidak membutuhkan
+      // UNIQUE(tanggal, nama_sesi) seperti perintah upsert sebelumnya.
+      const { data: existingRows, error: readError } = await supabase
+        .from("ngaji_sessions")
+        .select("id, nama_sesi, tanggal, waktu_mulai, waktu_selesai, status, keterangan")
+        .eq("tanggal", selectedNgajiDate);
+
+      if (readError) throw readError;
+
+      const existingNames = new Set(
+        (existingRows || []).map((row: NgajiSession) => row.nama_sesi.toLowerCase())
+      );
+
+      const missingRows = DEFAULT_NGAJI_SESSIONS
+        .filter(session => !existingNames.has(session.nama_sesi.toLowerCase()))
+        .map(session => ({
+          ...session,
+          tanggal: selectedNgajiDate,
+          status: "dibuka",
+          keterangan: `Absensi ngaji ${session.nama_sesi}`
+        }));
+
+      // Buat hanya sesi yang belum ada pada tanggal tersebut.
+      if (missingRows.length) {
+        const { error: insertError } = await supabase
+          .from("ngaji_sessions")
+          .insert(missingRows);
+
+        if (insertError) throw insertError;
+      }
+
+      const { data, error } = await supabase
+        .from("ngaji_sessions")
+        .select("id, nama_sesi, tanggal, waktu_mulai, waktu_selesai, status, keterangan")
+        .eq("tanggal", selectedNgajiDate)
+        .order("id", { ascending: true });
+
+      if (error) throw error;
+
+      const order = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"];
+      ngajiSessions = ((data || []) as NgajiSession[])
+        .filter(item => order.includes(item.nama_sesi))
+        .sort((a, b) => order.indexOf(a.nama_sesi) - order.indexOf(b.nama_sesi));
+
+      // Pilih sesi yang masih dibuka secara otomatis, tetapi tetap izinkan
+      // pengguna mengganti pilihan melalui dropdown.
+      const selectedStillExists = ngajiSessions.some(
+        item => String(item.id) === String(selectedNgajiSessionId)
+      );
+
+      if (!selectedStillExists) {
+        const firstOpen = ngajiSessions.find(item => item.status === "dibuka");
+        selectedNgajiSessionId = firstOpen ? String(firstOpen.id) : "";
+      }
+
+      await loadNgajiAttendanceCount();
+    } catch (error) {
+      console.error("Gagal memuat sesi ngaji:", error);
+      ngajiSessions = [];
+      selectedNgajiSessionId = "";
+      const detail = error instanceof Error ? error.message : String(error);
+      showToast("Gagal memuat sesi ngaji: " + detail, true);
+    } finally {
+      ngajiSessionsLoading = false;
+    }
+  }
+
+  async function selectNgajiSession(value: string) {
+    selectedNgajiSessionId = value;
+    ngajiLastScannedStudent = null;
+    ngajiScanMessage = "";
+    cameraError = "";
+
+    if (qrScannerRunning || qrScannerStarting) {
+      await stopQRScanner();
+    }
+
+    await loadNgajiAttendanceCount();
+  }
+
+  async function changeNgajiDate() {
+    if (qrScannerRunning || qrScannerStarting) await stopQRScanner();
+    selectedNgajiSessionId = "";
+    ngajiLastScannedStudent = null;
+    ngajiScanMessage = "";
+    await loadNgajiSessions();
+  }
+
+  async function loadNgajiAttendanceCount() {
+    if (!selectedNgajiSessionId) {
+      ngajiAttendanceCount = 0;
+      ngajiAttendanceRows = [];
+      ngajiAttendanceError = "";
+      return;
+    }
+
+    ngajiAttendanceLoading = true;
+    ngajiAttendanceError = "";
+    try {
+      const { data, error } = await supabase
+        .from("ngaji_attendance")
+        .select("id, session_id, user_id, tanggal, status, metode, created_at")
+        .eq("session_id", Number(selectedNgajiSessionId))
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+      ngajiAttendanceRows = (data || []) as NgajiAttendanceRecord[];
+      ngajiAttendanceCount = ngajiAttendanceRows.filter(row => row.status === "hadir").length;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      ngajiAttendanceError = detail;
+      ngajiAttendanceRows = [];
+      ngajiAttendanceCount = 0;
+      console.error("Gagal memuat daftar hadir ngaji:", error);
+    } finally {
+      ngajiAttendanceLoading = false;
+    }
+  }
+
+  $: ngajiPresentIds = new Set(
+    ngajiAttendanceRows.filter(row => row.status === "hadir").map(row => Number(row.user_id))
+  );
+  $: ngajiPresentStudents = santriUsers.filter(user => ngajiPresentIds.has(Number(user.id)));
+  $: ngajiAbsentStudents = santriUsers.filter(user => !ngajiPresentIds.has(Number(user.id)));
+  $: ngajiFilteredPresentStudents = ngajiPresentStudents.filter(user => {
+    const keyword = ngajiAttendanceSearch.trim().toLowerCase();
+    return !keyword || (user.full_name || user.username).toLowerCase().includes(keyword);
+  });
+  $: ngajiFilteredAbsentStudents = ngajiAbsentStudents.filter(user => {
+    const keyword = ngajiAttendanceSearch.trim().toLowerCase();
+    return !keyword || (user.full_name || user.username).toLowerCase().includes(keyword);
+  });
+
+  function exportNgajiAttendance() {
+    const session = ngajiSessions.find(item => String(item.id) === String(selectedNgajiSessionId));
+    if (!session) {
+      showToast("Pilih sesi ngaji terlebih dahulu.", true);
+      return;
+    }
+    const rows = [
+      ["Tanggal", "Sesi", "Nama Santri", "Username", "Status"],
+      ...santriUsers.map(user => [
+        session.tanggal,
+        session.nama_sesi,
+        user.full_name || user.username,
+        user.username,
+        ngajiPresentIds.has(Number(user.id)) ? "Hadir" : "Belum Hadir"
+      ])
+    ];
+    const csv = rows.map(row => row.map(value =>
+      '"' + String(value ?? "").replace(/"/g, '""') + '"'
+    ).join(",")).join("\r\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `absensi-ngaji-${session.tanggal}-${session.nama_sesi.toLowerCase()}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function saveNgajiAttendanceFromQR(userId: number) {
+    if (!canManageAttendance) {
+      showToast("Hanya admin atau ustad yang dapat mengisi absensi ngaji.", true);
+      return false;
+    }
+
+    if (!selectedNgajiSessionId) {
+      ngajiScanMessage = "Pilih tanggal dan sesi ngaji terlebih dahulu.";
+      showToast(ngajiScanMessage, true);
+      return false;
+    }
+
+    const santri = santriUsers.find(user => user.id === userId);
+    if (!santri) {
+      ngajiScanMessage = "QR Code bukan milik santri yang terdaftar.";
+      showToast(ngajiScanMessage, true);
+      return false;
+    }
+
+    const session = ngajiSessions.find(item => item.id === Number(selectedNgajiSessionId));
+    if (!session || session.status !== "dibuka") {
+      ngajiScanMessage = "Sesi ngaji tidak ditemukan atau sudah ditutup.";
+      showToast(ngajiScanMessage, true);
+      return false;
+    }
+
+    const { error } = await supabase
+      .from("ngaji_attendance")
+      .insert({
+        session_id: Number(selectedNgajiSessionId),
+        user_id: userId,
+        tanggal: session.tanggal,
+        status: "hadir",
+        metode: "qr_scan"
+      });
+
+    if (error) {
+      if (error.code === "23505") {
+        ngajiScanMessage = `${santri.full_name || santri.username} sudah absen pada sesi ${session.nama_sesi}.`;
+      } else {
+        ngajiScanMessage = "Gagal menyimpan absensi ngaji: " + error.message;
+      }
+      showToast(ngajiScanMessage, true);
+      return false;
+    }
+
+    ngajiLastScannedStudent = santri;
+    ngajiScanMessage = `✓ ${santri.full_name || santri.username} berhasil absen pada ${session.nama_sesi}.`;
+    await loadNgajiAttendanceCount();
+    showToast(ngajiScanMessage);
+    return true;
+  }
+
   async function generateQRCode(userId: number) {
     try {
       return await QRCode.toDataURL(`SANTRI:${userId}`, {
@@ -371,7 +640,11 @@
     lastScannedPayload = payload;
 
     try {
-      await saveAttendanceFromQR(userId);
+      if (activeView === "ngajiScan") {
+        await saveNgajiAttendanceFromQR(userId);
+      } else {
+        await saveAttendanceFromQR(userId);
+      }
     } finally {
       setTimeout(() => {
         qrScanBusy = false;
@@ -423,7 +696,7 @@
     }
 
     try {
-      if (qrScannerRunning) {
+      if (scanner.isScanning) {
         await scanner.stop();
       }
     } catch (error) {
@@ -443,27 +716,30 @@
     if (qrScannerRunning || qrScannerStarting) return;
 
     if (!canManageAttendance) {
-      showToast("Hanya admin atau ustad yang dapat menggunakan scanner absensi.", true);
+      showToast("Hanya admin atau ustad yang dapat menggunakan scanner.", true);
       return;
+    }
+
+    if (activeView === "ngajiScan") {
+      const selected = ngajiSessions.find(
+        item => String(item.id) === String(selectedNgajiSessionId)
+      );
+
+      if (!selectedNgajiSessionId || !selected) {
+        showToast("Pilih sesi ngaji terlebih dahulu.", true);
+        return;
+      }
+
+      if (selected.status !== "dibuka") {
+        showToast("Sesi ini sudah ditutup. Pilih sesi yang masih dibuka.", true);
+        return;
+      }
     }
 
     if (typeof window === "undefined") return;
 
-    const reader = document.getElementById("qr-reader");
-    if (!reader) {
-      showToast("Area kamera belum siap. Buka halaman Scan Absensi lalu coba lagi.", true);
-      return;
-    }
-
-    if (!window.isSecureContext) {
-      cameraError = "Kamera browser membutuhkan HTTPS. Jika development, gunakan localhost.";
-      qrScanMessage = cameraError;
-      showToast(cameraError, true);
-      return;
-    }
-
-    if (!navigator.mediaDevices?.getUserMedia) {
-      cameraError = "Browser ini tidak mendukung akses kamera.";
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      cameraError = "Kamera membutuhkan HTTPS (atau localhost) dan izin kamera browser.";
       qrScanMessage = cameraError;
       showToast(cameraError, true);
       return;
@@ -475,88 +751,49 @@
     lastScannedPayload = "";
     qrScanBusy = false;
 
-    // Pastikan instance lama benar-benar dilepas sebelum membuat instance baru.
-    await releaseQRScanner();
-
-    // Bersihkan isi target agar html5-qrcode tidak bertabrakan dengan instance sebelumnya.
-    reader.innerHTML = "";
-
     try {
-      // getCameras() sekaligus memicu permission request pada browser yang mendukungnya.
-      const cameras = await Html5Qrcode.getCameras();
+      await releaseQRScanner();
 
-      if (!cameras?.length) {
-        throw new Error("Tidak ada kamera yang tersedia.");
-      }
+      // Tunggu sampai elemen halaman aktif tersedia di DOM.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
-      // Utamakan kamera belakang pada HP berdasarkan label.
-      const backCamera =
-        cameras.find(camera =>
-          /back|rear|environment|belakang|belakang/i.test(camera.label)
-        ) || cameras[cameras.length > 1 ? 1 : 0] || cameras[0];
+      const reader = document.getElementById("qr-reader");
+      if (!reader) throw new Error("Area kamera tidak ditemukan. Buka kembali halaman scan.");
 
-      const scanner = new Html5Qrcode("qr-reader");
+      reader.innerHTML = "";
+
+      const scanner = new Html5Qrcode("qr-reader", {
+        verbose: false,
+        formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE]
+      });
       qrScanner = scanner;
 
-      const config = {
-        fps: 10,
-        qrbox: { width: 250, height: 250 },
-        aspectRatio: 1,
-        disableFlip: false,
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.QR_CODE,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.CODE_93,
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8
-        ]
-      };
-
-      try {
-        // Memulai berdasarkan deviceId lebih stabil daripada hanya mengandalkan facingMode.
-        await scanner.start(
-          backCamera.id,
-          config,
-          async (decodedText) => {
-            await handleQRCode(decodedText);
+      await scanner.start(
+        { facingMode: "environment" },
+        {
+          fps: 12,
+          qrbox: (viewWidth, viewHeight) => {
+            const size = Math.floor(Math.min(viewWidth, viewHeight, 280) * 0.82);
+            return { width: size, height: size };
           },
-          () => {
-            // Tidak ada QR pada frame ini: abaikan.
-          }
-        );
-      } catch (firstError) {
-        // Fallback untuk perangkat/browser yang menolak deviceId tertentu.
-        try {
-          await scanner.clear();
-
-          const fallbackScanner = new Html5Qrcode("qr-reader");
-          qrScanner = fallbackScanner;
-
-          await fallbackScanner.start(
-            { facingMode: { ideal: "environment" } },
-            config,
-            async (decodedText) => {
-              await handleQRCode(decodedText);
-            },
-            () => {}
-          );
-        } catch (fallbackError) {
-          try {
-            await scanner.clear();
-          } catch {}
-
-          throw fallbackError ?? firstError;
+          aspectRatio: 1
+        },
+        async decodedText => {
+          await handleQRCode(decodedText);
+        },
+        () => {
+          // Frame tanpa QR diabaikan.
         }
-      }
+      );
 
       qrScannerRunning = true;
-      qrScanMessage = "Kamera aktif. Arahkan kamera ke QR Code/barcode santri.";
+      qrScanMessage = "Kamera aktif. Arahkan QR Code santri ke dalam kotak pemindai.";
     } catch (error) {
       console.error("Gagal membuka kamera:", error);
-
       await releaseQRScanner();
-      reader.innerHTML = "";
+
+      const reader = document.getElementById("qr-reader");
+      if (reader) reader.innerHTML = "";
 
       cameraError = getCameraErrorMessage(error);
       qrScanMessage = cameraError;
@@ -2915,7 +3152,10 @@
     view: ActiveView
   ) {
     // Kamera hanya aktif pada halaman Scan Absensi.
-    if (activeView === "attendanceScan" && view !== "attendanceScan") {
+    if (
+      (activeView === "attendanceScan" || activeView === "ngajiScan") &&
+      view !== activeView
+    ) {
       await stopQRScanner();
     }
 
@@ -2927,6 +3167,13 @@
       lastScannedPayload = "";
       qrScanMessage = "";
       await loadAttendance();
+    }
+
+    if (view === "ngajiScan") {
+      ngajiLastScannedStudent = null;
+      ngajiScanMessage = "";
+      lastScannedPayload = "";
+      await loadNgajiSessions();
     }
 
     if (view === "barcode") {
@@ -3013,6 +3260,17 @@
         >
           📷
           Scan Absensi
+        </button>
+      {/if}
+
+      {#if canManageAttendance}
+        <button
+          class:active={activeView === "ngajiScan"}
+          class="nav-item scan-nav-item"
+          on:click={() => changeView("ngajiScan")}
+        >
+          📖
+          Absensi Ngaji
         </button>
       {/if}
 
@@ -3755,6 +4013,196 @@
 
 
       <!-- =========================
+           SCAN ABSENSI NGAJI
+      ========================= -->
+
+      {:else if activeView === "ngajiScan"}
+
+        <div class="bca-card sub-view-container scan-attendance-page">
+          <div class="sub-header-row">
+            <div>
+              <span class="section-kicker">ABSENSI KEGIATAN NGAJI</span>
+              <h3>📖 Scan QR Absensi Ngaji Santri</h3>
+              <p class="sub-description">
+                Pilih sesi ngaji, lalu scan QR Code santri. Kehadiran disimpan terpisah dari absensi sekolah.
+              </p>
+            </div>
+            <button class="btn-back" type="button" on:click={() => changeView("home")}>
+              ← Kembali
+            </button>
+          </div>
+
+          {#if !canManageAttendance}
+            <div class="qr-attendance-box scanner-access-denied">
+              <div class="scanner-placeholder-icon">🔒</div>
+              <strong>Akses scan absensi ngaji tidak tersedia</strong>
+              <span>Hanya admin atau ustad yang dapat menggunakan scanner.</span>
+            </div>
+          {:else}
+            <div class="scan-date-card">
+              <label for="ngaji-date-select">Tanggal Absensi</label>
+              <input
+                id="ngaji-date-select"
+                type="date"
+                bind:value={selectedNgajiDate}
+                on:change={changeNgajiDate}
+              />
+
+              <label for="ngaji-session-select">Pilih Sesi Ngaji</label>
+              <select
+                id="ngaji-session-select"
+                value={selectedNgajiSessionId}
+                on:change={(event) => selectNgajiSession((event.currentTarget as HTMLSelectElement).value)}
+                disabled={ngajiSessionsLoading || ngajiSessions.length === 0}
+              >
+                <option value="">-- Pilih sesi ngaji --</option>
+                {#each ngajiSessions as session}
+                  <option value={String(session.id)}>
+                    {session.nama_sesi}
+                    {session.waktu_mulai ? ` • ${session.waktu_mulai.slice(0, 5)}` : ""}
+                    {session.status !== "dibuka" ? " • Ditutup (tidak bisa scan)" : ""}
+                  </option>
+                {/each}
+              </select>
+              {#if ngajiSessionsLoading}
+                <small>Menyiapkan pilihan sesi ngaji...</small>
+              {/if}
+              <div class="ngaji-attendance-summary">
+                <div><strong>{ngajiPresentStudents.length}</strong><span>Hadir</span></div>
+                <div><strong>{ngajiAbsentStudents.length}</strong><span>Belum hadir</span></div>
+                <div><strong>{santriUsers.length}</strong><span>Total santri</span></div>
+              </div>
+              {#if !ngajiSessions.length}
+                <div class="camera-help-box">
+                  Sesi untuk tanggal ini belum tersedia. Pastikan SQL absensi ngaji sudah dijalankan dan akses Supabase diizinkan.
+                </div>
+              {/if}
+            </div>
+
+            <div class="qr-attendance-box scanner-box">
+              <div class="qr-attendance-header">
+                <div>
+                  <span class="section-kicker">SCANNER NGAJI</span>
+                  <h3>📱 Arahkan kamera ke QR Code Santri</h3>
+                  <p>QR yang terbaca akan otomatis disimpan sebagai Hadir pada sesi yang dipilih.</p>
+                </div>
+                {#if qrScannerRunning}
+                  <button class="btn-danger" type="button" on:click={stopQRScanner}>⏹ Stop Kamera</button>
+                {:else}
+                  <button
+                    class="btn-primary"
+                    type="button"
+                    on:click={startQRScanner}
+                    disabled={qrScannerStarting || ngajiSessionsLoading || !selectedNgajiSessionId || ngajiSessions.find(item => String(item.id) === String(selectedNgajiSessionId))?.status !== "dibuka"}
+                  >
+                    {qrScannerStarting ? "⏳ Membuka Kamera..." : "📷 Mulai Scan Ngaji"}
+                  </button>
+                {/if}
+              </div>
+
+              <div id="qr-reader" class:qr-reader-active={qrScannerRunning}></div>
+
+              {#if !qrScannerRunning}
+                <div class="scanner-placeholder">
+                  <div class="scanner-placeholder-icon">📖</div>
+                  <strong>Kamera belum aktif</strong>
+                  <span>Pilih tanggal dan salah satu sesi (Subuh, Dzuhur, Ashar, Maghrib, atau Isya), lalu tekan Mulai Scan Ngaji.</span>
+                </div>
+              {/if}
+
+              {#if ngajiScanMessage}
+                <div class:success={!!ngajiLastScannedStudent} class="qr-scan-message">
+                  {ngajiScanMessage}
+                </div>
+              {/if}
+
+              {#if cameraError}
+                <div class="camera-help-box">
+                  <strong>Kamera tidak dapat dibuka:</strong>
+                  <span>{cameraError} Pastikan situs menggunakan HTTPS atau localhost dan izin kamera diaktifkan.</span>
+                </div>
+              {/if}
+
+              {#if ngajiLastScannedStudent}
+                <div class="qr-student-result">
+                  <div class="user-avatar">{(ngajiLastScannedStudent.full_name || ngajiLastScannedStudent.username).charAt(0).toUpperCase()}</div>
+                  <div>
+                    <strong>{ngajiLastScannedStudent.full_name || ngajiLastScannedStudent.username}</strong>
+                    <span>ID-{ngajiLastScannedStudent.id} • Hadir Ngaji</span>
+                  </div>
+                </div>
+              {/if}
+            </div>
+            <section class="ngaji-roster-card">
+              <div class="ngaji-roster-heading">
+                <div>
+                  <span class="section-kicker">REKAP KEHADIRAN</span>
+                  <h3>Daftar Santri Hadir & Belum Hadir</h3>
+                  <p class="sub-description">Daftar mengikuti tanggal dan sesi ngaji yang dipilih.</p>
+                </div>
+                <button class="btn-secondary" type="button" on:click={loadNgajiAttendanceCount} disabled={ngajiAttendanceLoading || !selectedNgajiSessionId}>
+                  {ngajiAttendanceLoading ? "Memuat..." : "↻ Perbarui"}
+                </button>
+              </div>
+              <div class="ngaji-roster-tools">
+                <input type="search" placeholder="Cari nama santri..." bind:value={ngajiAttendanceSearch} aria-label="Cari nama santri" />
+                <button class="btn-primary" type="button" on:click={exportNgajiAttendance} disabled={!selectedNgajiSessionId || santriUsers.length === 0}>⬇ Export CSV</button>
+              </div>
+              {#if ngajiAttendanceError}
+                <div class="camera-help-box">
+                  <strong>Gagal mengambil daftar absensi.</strong>
+                  <span>{ngajiAttendanceError}. Pastikan kebijakan SELECT Supabase mengizinkan pengguna membaca tabel ngaji_attendance.</span>
+                </div>
+              {:else if ngajiAttendanceLoading}
+                <p class="ngaji-roster-empty">Memuat daftar kehadiran...</p>
+              {:else if !selectedNgajiSessionId}
+                <p class="ngaji-roster-empty">Pilih tanggal dan sesi untuk melihat daftar kehadiran.</p>
+              {:else}
+                <div class="ngaji-roster-columns">
+                  <div class="ngaji-roster-group">
+                    <h4>✅ Hadir <span>{ngajiFilteredPresentStudents.length}</span></h4>
+                    {#if ngajiFilteredPresentStudents.length === 0}
+                      <p class="ngaji-roster-empty">Belum ada santri hadir{ngajiAttendanceSearch ? " yang cocok dengan pencarian." : " pada sesi ini."}</p>
+                    {:else}
+                      <div class="ngaji-student-list">
+                        {#each ngajiFilteredPresentStudents as student}
+                          <div class="ngaji-student-row">
+                            <span class="ngaji-student-avatar">{(student.full_name || student.username).charAt(0).toUpperCase()}</span>
+                            <span class="ngaji-student-name">{student.full_name || student.username}<small>{student.username}</small></span>
+                            <span class="ngaji-status-present">Hadir</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="ngaji-roster-group">
+                    <h4>⏳ Belum Hadir <span>{ngajiFilteredAbsentStudents.length}</span></h4>
+                    {#if ngajiFilteredAbsentStudents.length === 0}
+                      <p class="ngaji-roster-empty">Semua santri sudah hadir atau tidak ada hasil pencarian.</p>
+                    {:else}
+                      <div class="ngaji-student-list">
+                        {#each ngajiFilteredAbsentStudents as student}
+                          <div class="ngaji-student-row">
+                            <span class="ngaji-student-avatar absent">{(student.full_name || student.username).charAt(0).toUpperCase()}</span>
+                            <span class="ngaji-student-name">{student.full_name || student.username}<small>{student.username}</small></span>
+                            <span class="ngaji-status-absent">Belum hadir</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+            </section>
+
+            <div class="camera-help-box">
+              <strong>Catatan:</strong>
+              QR Code menggunakan format SANTRI:{'{'}id{'}'} yang sama dengan halaman Barcode Santri. Absensi ngaji tersimpan di tabel ngaji_attendance, bukan tabel attendance.
+            </div>
+          {/if}
+        </div>
+
+      <!-- =========================
            SCHEDULE
       ========================= -->
 
@@ -4427,6 +4875,57 @@
     </div>
 
   </main>
+
+  <!-- =========================
+       MOBILE BOTTOM NAVIGATION
+  ========================= -->
+  {#if canManageAttendance}
+    <div class="mobile-qr-bar" aria-label="Akses cepat scan QR">
+      <button
+        class:active={activeView === "ngajiScan"}
+        class="mobile-qr-action"
+        on:click={() => changeView("ngajiScan")}
+      >
+        <span class="mobile-qr-icon">📖</span>
+        <span class="mobile-qr-copy">
+          <strong>Scan QR Ngaji</strong>
+          <small>Absensi kegiatan ngaji</small>
+        </span>
+        <span class="mobile-qr-arrow">›</span>
+      </button>
+    </div>
+  {/if}
+
+  <nav class="mobile-bottom-nav" aria-label="Navigasi utama">
+    <button class:active={activeView === "home"} on:click={() => changeView("home")}>
+      <span class="bottom-nav-icon">⌂</span>
+      <span>Beranda</span>
+    </button>
+    <button class:active={activeView === "attendance"} on:click={() => changeView("attendance")}>
+      <span class="bottom-nav-icon">◷</span>
+      <span>Absensi</span>
+    </button>
+    {#if canManageAttendance}
+      <button class:active={activeView === "attendanceScan"} class="bottom-nav-scan" on:click={() => changeView("attendanceScan")} aria-label="Scan QR Absensi">
+        <span class="bottom-scan-orbit"></span>
+        <span class="bottom-scan-icon">▦</span>
+        <span>Scan QR</span>
+      </button>
+    {:else}
+      <button class:active={activeView === "grades"} on:click={() => changeView("grades")}>
+        <span class="bottom-nav-icon">▤</span>
+        <span>Nilai</span>
+      </button>
+    {/if}
+    <button class:active={activeView === "schedule"} on:click={() => changeView("schedule")}>
+      <span class="bottom-nav-icon">◫</span>
+      <span>Jadwal</span>
+    </button>
+    <button class:active={activeView === "announcement"} on:click={() => changeView("announcement")}>
+      <span class="bottom-nav-icon">◈</span>
+      <span>Info</span>
+    </button>
+  </nav>
 
 </div>
 
@@ -7501,6 +8000,19 @@
     gap: 14px;
   }
 
+  .scan-date-card select,
+  .scan-date-card input[type="date"] {
+    width: 100%;
+    min-height: 44px;
+    margin: 8px 0;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    background: #fff;
+    color: #0f172a;
+    font: inherit;
+  }
+
   .scan-date-card,
   .scan-status-card {
     padding: 18px;
@@ -7999,6 +8511,108 @@
 
   }
 
+
+  /* =========================
+     MOBILE FLOATING NAVIGATION
+  ========================= */
+
+  .mobile-qr-bar,
+  .mobile-bottom-nav {
+    display: none;
+  }
+
+  @media (max-width: 768px) {
+    .main-content { padding-bottom: 138px; }
+
+    .mobile-qr-bar {
+      display: block;
+      position: fixed;
+      left: 14px;
+      right: 14px;
+      bottom: 82px;
+      z-index: 120;
+    }
+
+    .mobile-qr-action {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid rgba(255,255,255,.55);
+      border-radius: 20px;
+      padding: 12px 14px;
+      color: #fff;
+      cursor: pointer;
+      text-align: left;
+      background: linear-gradient(135deg, #0757d8 0%, #1644b8 52%, #5b21b6 100%);
+      box-shadow: 0 14px 34px rgba(29,78,216,.30), inset 0 1px 0 rgba(255,255,255,.22);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      transition: transform .2s ease, box-shadow .2s ease;
+    }
+
+    .mobile-qr-action:active { transform: scale(.98); }
+    .mobile-qr-action.active { box-shadow: 0 16px 38px rgba(29,78,216,.40), inset 0 1px 0 rgba(255,255,255,.3); }
+
+    .mobile-qr-icon {
+      width: 42px; height: 42px; flex: 0 0 42px;
+      display: grid; place-items: center; border-radius: 14px;
+      background: rgba(255,255,255,.17); border: 1px solid rgba(255,255,255,.2);
+      font-size: 25px; font-weight: 800;
+    }
+
+    .mobile-qr-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .mobile-qr-copy strong { font-size: 13px; letter-spacing: .01em; }
+    .mobile-qr-copy small { font-size: 10px; opacity: .78; }
+    .mobile-qr-arrow { font-size: 28px; line-height: 1; opacity: .85; }
+
+    .mobile-bottom-nav {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      align-items: end;
+      position: fixed;
+      left: 10px; right: 10px; bottom: 10px;
+      height: 70px;
+      padding: 7px 6px 5px;
+      z-index: 121;
+      border: 1px solid rgba(148,163,184,.24);
+      border-radius: 25px;
+      background: rgba(255,255,255,.88);
+      box-shadow: 0 18px 50px rgba(15,23,42,.18), 0 3px 12px rgba(15,23,42,.08);
+      backdrop-filter: blur(22px) saturate(160%);
+      -webkit-backdrop-filter: blur(22px) saturate(160%);
+    }
+
+    .mobile-bottom-nav button {
+      position: relative; min-width: 0; height: 56px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+      border: 0; background: transparent; color: #64748b;
+      font-size: 9px; font-weight: 700; cursor: pointer; border-radius: 18px;
+      transition: color .2s ease, transform .2s ease, background .2s ease;
+    }
+
+    .mobile-bottom-nav button.active { color: #1747b7; background: rgba(37,99,235,.08); }
+    .mobile-bottom-nav button:active { transform: translateY(1px) scale(.97); }
+    .bottom-nav-icon { font-size: 22px; line-height: 22px; font-weight: 800; }
+
+    .bottom-nav-scan {
+      height: 66px !important; margin-top: -25px; border-radius: 22px !important;
+      color: #fff !important;
+      background: linear-gradient(145deg, #2563eb, #4f46e5 58%, #7c3aed) !important;
+      box-shadow: 0 12px 28px rgba(37,99,235,.38);
+      border: 4px solid rgba(255,255,255,.92) !important; overflow: visible;
+    }
+
+    .bottom-nav-scan.active { box-shadow: 0 14px 32px rgba(79,70,229,.46); }
+    .bottom-scan-icon {
+      width: 32px; height: 32px; display: grid; place-items: center; border-radius: 11px;
+      background: rgba(255,255,255,.17); font-size: 20px; line-height: 1;
+    }
+    .bottom-scan-orbit {
+      position: absolute; inset: -5px; border: 1px solid rgba(255,255,255,.28);
+      border-radius: 25px; pointer-events: none;
+    }
+  }
 
   /* =========================
      TABLET
@@ -8681,5 +9295,88 @@
       min-width: 120px;
     }
   }
+
+  /* Perbaikan tampilan pilihan sesi dan area kamera absensi ngaji */
+  .scan-date-card select,
+  .scan-date-card input[type="date"] {
+    display: block;
+    width: 100%;
+    min-height: 48px;
+    margin: 8px 0 16px;
+    padding: 12px 14px;
+    border: 1px solid #d7deea;
+    border-radius: 12px;
+    background: #fff;
+    color: #172033;
+    font: inherit;
+    font-size: 15px;
+    box-sizing: border-box;
+  }
+
+  .scan-date-card select:disabled {
+    opacity: .65;
+    cursor: not-allowed;
+  }
+
+  #qr-reader {
+    width: 100%;
+    max-width: 560px;
+    min-height: 0;
+    margin: 18px auto;
+    overflow: hidden;
+    border-radius: 16px;
+  }
+
+  #qr-reader video {
+    width: 100% !important;
+    max-height: 480px;
+    object-fit: cover;
+    border-radius: 14px;
+  }
+
+  #qr-reader__dashboard,
+  #qr-reader__status_span {
+    color: inherit;
+  }
+
+  @media (max-width: 640px) {
+    .scan-date-card { padding: 16px; }
+    #qr-reader { max-width: 100%; }
+    .qr-attendance-header {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .qr-attendance-header button { width: 100%; }
+  }
+
+
+  /* Rekap daftar hadir absensi ngaji */
+  .ngaji-attendance-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:16px; }
+  .ngaji-attendance-summary > div { display:flex; flex-direction:column; gap:4px; padding:14px 16px; border:1px solid #e2e8f0; border-radius:14px; background:#f8fafc; }
+  .ngaji-attendance-summary strong { font-size:24px; color:#0f172a; }
+  .ngaji-attendance-summary span { color:#64748b; font-size:12px; }
+  .ngaji-roster-card { margin-top:20px; padding:20px; border:1px solid #e2e8f0; border-radius:18px; background:#fff; }
+  .ngaji-roster-heading,.ngaji-roster-tools { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+  .ngaji-roster-heading h3 { margin:5px 0; color:#0f172a; }
+  .ngaji-roster-tools { margin:18px 0; }
+  .ngaji-roster-tools input { flex:1; min-width:0; padding:12px 14px; border:1px solid #cbd5e1; border-radius:10px; font:inherit; }
+  .ngaji-roster-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+  .ngaji-roster-group { min-width:0; border:1px solid #e2e8f0; border-radius:14px; overflow:hidden; }
+  .ngaji-roster-group h4 { display:flex; align-items:center; justify-content:space-between; margin:0; padding:14px 16px; background:#f8fafc; color:#1e293b; border-bottom:1px solid #e2e8f0; }
+  .ngaji-roster-group h4 span { padding:3px 9px; border-radius:999px; background:#e2e8f0; font-size:12px; }
+  .ngaji-student-list { max-height:420px; overflow:auto; }
+  .ngaji-student-row { display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid #f1f5f9; }
+  .ngaji-student-row:last-child { border-bottom:0; }
+  .ngaji-student-avatar { display:grid; place-items:center; flex:0 0 34px; width:34px; height:34px; border-radius:11px; background:#dcfce7; color:#166534; font-weight:800; }
+  .ngaji-student-avatar.absent { background:#fee2e2; color:#991b1b; }
+  .ngaji-student-name { display:flex; flex:1; flex-direction:column; min-width:0; font-weight:700; color:#1e293b; }
+  .ngaji-student-name small { margin-top:2px; color:#64748b; font-weight:400; }
+  .ngaji-status-present,.ngaji-status-absent { font-size:11px; font-weight:700; white-space:nowrap; }
+  .ngaji-status-present { color:#15803d; }
+  .ngaji-status-absent { color:#b91c1c; }
+  .ngaji-roster-empty { padding:18px; color:#64748b; font-size:13px; }
+  @media(max-width:760px) { .ngaji-roster-columns { grid-template-columns:1fr; } .ngaji-roster-heading,.ngaji-roster-tools { align-items:stretch; flex-direction:column; } .ngaji-roster-tools button { width:100%; } }
+  @media(max-width:480px) { .ngaji-attendance-summary { gap:7px; } .ngaji-attendance-summary>div { padding:11px 9px; } .ngaji-attendance-summary strong { font-size:20px; } .ngaji-attendance-summary span { font-size:10px; } .ngaji-roster-card { padding:14px; } }
+
 </style>
 
