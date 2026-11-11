@@ -84,7 +84,7 @@
     id?: number;
     user_id: number;
     date: string;
-    status: "hadir" | "izin" | "sakit" | "alpha";
+    status: "hadir" | "izin" | "sakit" | "alpha" | "pulang";
   }
 
   interface NgajiAttendanceRecord {
@@ -92,7 +92,7 @@
     session_id: number;
     user_id: number;
     tanggal: string;
-    status: "hadir" | "izin" | "sakit" | "alpha";
+    status: "hadir" | "izin" | "sakit" | "alpha" | "pulang";
     metode?: string | null;
     created_at?: string;
   }
@@ -467,10 +467,37 @@
   }
 
   $: ngajiPresentIds = new Set(
-    ngajiAttendanceRows.filter(row => row.status === "hadir").map(row => Number(row.user_id))
+    ngajiAttendanceRows.map(row => Number(row.user_id))
   );
   $: ngajiPresentStudents = santriUsers.filter(user => ngajiPresentIds.has(Number(user.id)));
   $: ngajiAbsentStudents = santriUsers.filter(user => !ngajiPresentIds.has(Number(user.id)));
+  function getNgajiStudentStatus(userId: number): AttendanceStatus {
+    return ngajiAttendanceRows.find(row => Number(row.user_id) === Number(userId))?.status ?? "";
+  }
+
+  async function saveNgajiAttendanceManual(userId: number, status: AttendanceStatus) {
+    if (!canManageAttendance || !selectedNgajiSessionId || !status) {
+      showToast("Pilih sesi dan status absensi ngaji terlebih dahulu.", true);
+      return;
+    }
+    const existing = ngajiAttendanceRows.find(row => Number(row.user_id) === Number(userId));
+    const payload = {
+      session_id: Number(selectedNgajiSessionId),
+      user_id: userId,
+      tanggal: selectedNgajiDate,
+      status,
+      metode: "manual"
+    };
+    const result = existing?.id
+      ? await supabase.from("ngaji_attendance").update({ status, metode: "manual" }).eq("id", existing.id)
+      : await supabase.from("ngaji_attendance").insert(payload);
+    if (result.error) {
+      showToast("Gagal menyimpan absensi ngaji: " + result.error.message, true);
+      return;
+    }
+    showToast("Absensi ngaji berhasil disimpan.");
+    await loadNgajiAttendanceCount();
+  }
   $: ngajiFilteredPresentStudents = ngajiPresentStudents.filter(user => {
     const keyword = ngajiAttendanceSearch.trim().toLowerCase();
     return !keyword || (user.full_name || user.username).toLowerCase().includes(keyword);
@@ -480,32 +507,95 @@
     return !keyword || (user.full_name || user.username).toLowerCase().includes(keyword);
   });
 
-  function exportNgajiAttendance() {
-    const session = ngajiSessions.find(item => String(item.id) === String(selectedNgajiSessionId));
-    if (!session) {
-      showToast("Pilih sesi ngaji terlebih dahulu.", true);
+  async function exportNgajiAttendance() {
+    await exportAttendanceRecapExcel();
+  }
+
+  // Export seluruh riwayat absensi sekolah dan ngaji ke satu file Excel.
+  // Data dibaca bertahap agar tidak terpotong oleh batas default Supabase.
+  async function fetchAllRows(table: "attendance" | "ngaji_attendance" | "ngaji_sessions", columns: string, orderColumn: string) {
+    const pageSize = 1000;
+    let allRows: any[] = [];
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(columns)
+        .order(orderColumn, { ascending: true })
+        .range(from, from + pageSize - 1);
+      if (error) throw error;
+      const batch = data || [];
+      allRows = allRows.concat(batch);
+      if (batch.length < pageSize) break;
+    }
+    return allRows;
+  }
+
+  async function exportAttendanceRecapExcel() {
+    if (!canManageAttendance) {
+      showToast("Hanya admin atau ustad yang dapat mengekspor rekap absensi.", true);
       return;
     }
-    const rows = [
-      ["Tanggal", "Sesi", "Nama Santri", "Username", "Status"],
-      ...santriUsers.map(user => [
-        session.tanggal,
-        session.nama_sesi,
-        user.full_name || user.username,
-        user.username,
-        ngajiPresentIds.has(Number(user.id)) ? "Hadir" : "Belum Hadir"
-      ])
-    ];
-    const csv = rows.map(row => row.map(value =>
-      '"' + String(value ?? "").replace(/"/g, '""') + '"'
-    ).join(",")).join("\r\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `absensi-ngaji-${session.tanggal}-${session.nama_sesi.toLowerCase()}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    try {
+      showToast("Sedang menyiapkan seluruh rekap absensi...");
+      const [schoolRows, ngajiRows, sessionRows] = await Promise.all([
+        fetchAllRows("attendance", "id, user_id, date, status", "date"),
+        fetchAllRows("ngaji_attendance", "id, session_id, user_id, tanggal, status, metode, created_at", "tanggal"),
+        fetchAllRows("ngaji_sessions", "id, nama_sesi, tanggal, waktu_mulai, waktu_selesai", "tanggal")
+      ]);
+
+      const statusLabels = ["hadir", "izin", "sakit", "alpha", "pulang", "belum absen"];
+
+      const schoolDates = [...new Set(schoolRows.map((row: any) => String(row.date)))].sort();
+      const schoolDetail: any[][] = [["Tanggal", "Nama Santri", "Username", "Kelas", "Status"]];
+      for (const date of schoolDates) {
+        const daily = new Map<number, string>(schoolRows
+          .filter((row: any) => String(row.date) === date)
+          .map((row: any): [number, string] => [Number(row.user_id), String(row.status || "").toLowerCase()]));
+        for (const student of santriUsers) {
+          schoolDetail.push([date, student.full_name || student.username, student.username, student.class_name || student.kelas || "-", daily.get(Number(student.id)) || "Belum Absen"]);
+        }
+      }
+      const schoolSummary: any[][] = [["Tanggal", "Hadir", "Izin", "Sakit", "Alpha", "Pulang", "Belum Absen", "Total Santri"]];
+      for (const date of schoolDates) {
+        const dailyRows = schoolDetail.slice(1).filter(row => row[0] === date);
+        const counts = statusLabels.map(status => dailyRows.filter(row => String(row[4]).toLowerCase() === status).length);
+        schoolSummary.push([date, ...counts.slice(0, 5), counts[5], santriUsers.length]);
+      }
+
+      const ngajiDetail: any[][] = [["Tanggal", "Sesi", "Waktu", "Nama Santri", "Username", "Status", "Metode Absen"]];
+      const ngajiSummary: any[][] = [["Tanggal", "Sesi", "Hadir", "Izin", "Sakit", "Alpha", "Pulang", "Belum Absen", "Total Santri"]];
+      const sortedSessions = [...sessionRows].sort((a: any, b: any) => String(a.tanggal).localeCompare(String(b.tanggal)) || String(a.nama_sesi).localeCompare(String(b.nama_sesi)));
+      for (const session of sortedSessions) {
+        const records = ngajiRows.filter((row: any) => Number(row.session_id) === Number(session.id));
+        const recordByUser = new Map<number, any>(records.map((row: any): [number, any] => [Number(row.user_id), row]));
+        const counts: Record<string, number> = { hadir: 0, izin: 0, sakit: 0, alpha: 0, pulang: 0, "belum absen": 0 };
+        for (const student of santriUsers) {
+          const record = recordByUser.get(Number(student.id));
+          const status = String(record?.status || "belum absen").toLowerCase();
+          if (status in counts) counts[status] += 1;
+          ngajiDetail.push([session.tanggal, session.nama_sesi, session.waktu_mulai || "-", student.full_name || student.username, student.username, status, record?.metode || "-"]);
+        }
+        ngajiSummary.push([session.tanggal, session.nama_sesi, counts.hadir, counts.izin, counts.sakit, counts.alpha, counts.pulang, counts["belum absen"], santriUsers.length]);
+      }
+
+      const workbook = XLSX.utils.book_new();
+      const addSheet = (name: string, rows: any[][]) => {
+        const sheet = XLSX.utils.aoa_to_sheet(rows);
+        sheet["!cols"] = (rows[0] || []).map((header: any) => ({ wch: Math.min(28, Math.max(14, String(header).length + 4)) }));
+        sheet["!autofilter"] = { ref: sheet["!ref"] || "A1:A1" };
+        XLSX.utils.book_append_sheet(workbook, sheet, name);
+      };
+      addSheet("Rekap Sekolah", schoolSummary);
+      addSheet("Detail Sekolah", schoolDetail);
+      addSheet("Rekap Ngaji", ngajiSummary);
+      addSheet("Detail Ngaji", ngajiDetail);
+      XLSX.writeFile(workbook, `rekap-absensi-sekolah-dan-ngaji-${getLocalDateValue()}.xlsx`);
+      showToast(`Export berhasil: ${schoolRows.length} data sekolah dan ${ngajiRows.length} data ngaji.`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("Gagal export rekap absensi:", error);
+      showToast("Gagal mengekspor rekap absensi: " + detail, true);
+    }
   }
 
   async function saveNgajiAttendanceFromQR(userId: number) {
@@ -2491,6 +2581,10 @@
     await saveAllAttendance();
   }
 
+  async function exportSchoolAttendance() {
+    await exportAttendanceRecapExcel();
+  }
+
   /* =========================
      LOAD SCHEDULE
   ========================= */
@@ -3119,7 +3213,10 @@
           "Sakit",
 
         alpha:
-          "Alpha"
+          "Alpha",
+
+        pulang:
+          "Pulang"
 
       };
 
@@ -3728,7 +3825,7 @@
                 <option value="hadir">Hadir</option>
                 <option value="izin">Izin</option>
                 <option value="sakit">Sakit</option>
-                <option value="alpha">Alpha</option>
+                <option value="alpha">Alpha</option>\n                        <option value="pulang">Pulang</option>
               </select>
 
               <span class="attendance-quick-note">
@@ -3737,6 +3834,12 @@
             </div>
 
           {/if}
+
+          <div class="attendance-bulk-actions">
+            <button class="btn-primary" type="button" on:click={exportSchoolAttendance} disabled={santriUsers.length === 0}>
+              ⬇ Export Semua Rekap (Excel)
+            </button>
+          </div>
 
           <div class="attendance-summary">
             <div class="attendance-summary-item">
@@ -3851,7 +3954,7 @@
                         <option value="hadir">Hadir</option>
                         <option value="izin">Izin</option>
                         <option value="sakit">Sakit</option>
-                        <option value="alpha">Alpha</option>
+                        <option value="alpha">Alpha</option>\n                        <option value="pulang">Pulang</option>
                       </select>
                     </td>
 
@@ -4068,8 +4171,8 @@
                 <small>Menyiapkan pilihan sesi ngaji...</small>
               {/if}
               <div class="ngaji-attendance-summary">
-                <div><strong>{ngajiPresentStudents.length}</strong><span>Hadir</span></div>
-                <div><strong>{ngajiAbsentStudents.length}</strong><span>Belum hadir</span></div>
+                <div><strong>{ngajiPresentStudents.length}</strong><span>Sudah absen</span></div>
+                <div><strong>{ngajiAbsentStudents.length}</strong><span>Belum absen</span></div>
                 <div><strong>{santriUsers.length}</strong><span>Total santri</span></div>
               </div>
               {#if !ngajiSessions.length}
@@ -4146,7 +4249,7 @@
               </div>
               <div class="ngaji-roster-tools">
                 <input type="search" placeholder="Cari nama santri..." bind:value={ngajiAttendanceSearch} aria-label="Cari nama santri" />
-                <button class="btn-primary" type="button" on:click={exportNgajiAttendance} disabled={!selectedNgajiSessionId || santriUsers.length === 0}>⬇ Export CSV</button>
+                <button class="btn-primary" type="button" on:click={exportNgajiAttendance} disabled={santriUsers.length === 0}>⬇ Export Semua Rekap (Excel)</button>
               </div>
               {#if ngajiAttendanceError}
                 <div class="camera-help-box">
@@ -4160,23 +4263,34 @@
               {:else}
                 <div class="ngaji-roster-columns">
                   <div class="ngaji-roster-group">
-                    <h4>✅ Hadir <span>{ngajiFilteredPresentStudents.length}</span></h4>
+                    <h4>✅ Sudah Absen <span>{ngajiFilteredPresentStudents.length}</span></h4>
                     {#if ngajiFilteredPresentStudents.length === 0}
-                      <p class="ngaji-roster-empty">Belum ada santri hadir{ngajiAttendanceSearch ? " yang cocok dengan pencarian." : " pada sesi ini."}</p>
+                      <p class="ngaji-roster-empty">Belum ada santri yang absen{ngajiAttendanceSearch ? " sesuai pencarian." : " pada sesi ini."}</p>
                     {:else}
                       <div class="ngaji-student-list">
                         {#each ngajiFilteredPresentStudents as student}
                           <div class="ngaji-student-row">
                             <span class="ngaji-student-avatar">{(student.full_name || student.username).charAt(0).toUpperCase()}</span>
                             <span class="ngaji-student-name">{student.full_name || student.username}<small>{student.username}</small></span>
-                            <span class="ngaji-status-present">Hadir</span>
+                            <select
+                              class="ngaji-manual-select"
+                              aria-label={`Ubah status ${student.full_name || student.username}`}
+                              value={getNgajiStudentStatus(student.id)}
+                              on:change={(event) => saveNgajiAttendanceManual(student.id, (event.currentTarget as HTMLSelectElement).value as AttendanceStatus)}
+                            >
+                              <option value="hadir">Hadir</option>
+                              <option value="izin">Izin</option>
+                              <option value="sakit">Sakit</option>
+                              <option value="alpha">Alpha</option>
+                              <option value="pulang">Pulang</option>
+                            </select>
                           </div>
                         {/each}
                       </div>
                     {/if}
                   </div>
                   <div class="ngaji-roster-group">
-                    <h4>⏳ Belum Hadir <span>{ngajiFilteredAbsentStudents.length}</span></h4>
+                    <h4>⏳ Belum Absen <span>{ngajiFilteredAbsentStudents.length}</span></h4>
                     {#if ngajiFilteredAbsentStudents.length === 0}
                       <p class="ngaji-roster-empty">Semua santri sudah hadir atau tidak ada hasil pencarian.</p>
                     {:else}
@@ -4185,7 +4299,18 @@
                           <div class="ngaji-student-row">
                             <span class="ngaji-student-avatar absent">{(student.full_name || student.username).charAt(0).toUpperCase()}</span>
                             <span class="ngaji-student-name">{student.full_name || student.username}<small>{student.username}</small></span>
-                            <span class="ngaji-status-absent">Belum hadir</span>
+                            <select
+                              class="ngaji-manual-select"
+                              value={getNgajiStudentStatus(student.id)}
+                              on:change={(event) => saveNgajiAttendanceManual(student.id, (event.currentTarget as HTMLSelectElement).value as AttendanceStatus)}
+                            >
+                              <option value="">Pilih status</option>
+                              <option value="hadir">Hadir</option>
+                              <option value="izin">Izin</option>
+                              <option value="sakit">Sakit</option>
+                              <option value="alpha">Alpha</option>
+                              <option value="pulang">Pulang</option>
+                            </select>
                           </div>
                         {/each}
                       </div>
@@ -9365,18 +9490,36 @@
   .ngaji-roster-group h4 { display:flex; align-items:center; justify-content:space-between; margin:0; padding:14px 16px; background:#f8fafc; color:#1e293b; border-bottom:1px solid #e2e8f0; }
   .ngaji-roster-group h4 span { padding:3px 9px; border-radius:999px; background:#e2e8f0; font-size:12px; }
   .ngaji-student-list { max-height:420px; overflow:auto; }
-  .ngaji-student-row { display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid #f1f5f9; }
+  .ngaji-student-row { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid #f1f5f9; min-width:0; }
   .ngaji-student-row:last-child { border-bottom:0; }
   .ngaji-student-avatar { display:grid; place-items:center; flex:0 0 34px; width:34px; height:34px; border-radius:11px; background:#dcfce7; color:#166534; font-weight:800; }
   .ngaji-student-avatar.absent { background:#fee2e2; color:#991b1b; }
   .ngaji-student-name { display:flex; flex:1; flex-direction:column; min-width:0; font-weight:700; color:#1e293b; }
   .ngaji-student-name small { margin-top:2px; color:#64748b; font-weight:400; }
   .ngaji-status-present,.ngaji-status-absent { font-size:11px; font-weight:700; white-space:nowrap; }
+  .ngaji-manual-select { flex:0 1 132px; width:132px; min-width:0; padding:9px 28px 9px 10px; border:1px solid #cbd5e1; border-radius:10px; background:#fff; color:#0f172a; font:inherit; font-size:12px; font-weight:650; outline:none; }
+  .ngaji-manual-select:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.12); }
   .ngaji-status-present { color:#15803d; }
   .ngaji-status-absent { color:#b91c1c; }
   .ngaji-roster-empty { padding:18px; color:#64748b; font-size:13px; }
   @media(max-width:760px) { .ngaji-roster-columns { grid-template-columns:1fr; } .ngaji-roster-heading,.ngaji-roster-tools { align-items:stretch; flex-direction:column; } .ngaji-roster-tools button { width:100%; } }
-  @media(max-width:480px) { .ngaji-attendance-summary { gap:7px; } .ngaji-attendance-summary>div { padding:11px 9px; } .ngaji-attendance-summary strong { font-size:20px; } .ngaji-attendance-summary span { font-size:10px; } .ngaji-roster-card { padding:14px; } }
+  @media(max-width:480px) {
+    .ngaji-attendance-summary { gap:7px; }
+    .ngaji-attendance-summary>div { padding:11px 9px; }
+    .ngaji-attendance-summary strong { font-size:20px; }
+    .ngaji-attendance-summary span { font-size:10px; }
+    .ngaji-roster-card { padding:13px; border-radius:14px; }
+    .ngaji-student-row { display:grid; grid-template-columns:34px minmax(0,1fr); gap:9px; padding:11px 10px; }
+    .ngaji-manual-select { grid-column:2; width:100%; max-width:none; flex:none; }
+    .ngaji-roster-group h4 { padding:12px; font-size:13px; }
+    .ngaji-roster-heading h3 { font-size:17px; }
+    .ngaji-roster-tools { gap:9px; }
+    .ngaji-roster-tools input,.ngaji-roster-tools button { width:100%; min-height:42px; }
+  }
+  @media(min-width:481px) and (max-width:760px) {
+    .ngaji-student-row { flex-wrap:wrap; }
+    .ngaji-manual-select { margin-left:44px; flex:1 1 calc(100% - 44px); width:auto; }
+  }
 
 </style>
 
