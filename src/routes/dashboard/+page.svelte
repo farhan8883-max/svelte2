@@ -770,6 +770,7 @@ import * as XLSX from "xlsx";
   let qrScannerStream: MediaStream | null = null;
   let qrScannerTimer: ReturnType<typeof setInterval> | null = null;
   let qrVideoElement: HTMLVideoElement;
+  let qrScannerMode: "santri" | "ustad" = "santri";
 
   /* =========================
      SCHEDULE
@@ -2583,8 +2584,9 @@ async function deleteUser(
     return `santri:${santriId}`;
   }
 
-  function getQrImageUrl(santriId: number) {
-    const data = encodeURIComponent(getQrValue(santriId));
+  function getQrImageUrl(userId: number, role: "santri" | "ustad" = "santri") {
+    const value = role === "ustad" ? `ustad:${userId}` : getQrValue(userId);
+    const data = encodeURIComponent(value);
     return `https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=10&data=${data}`;
   }
 
@@ -2607,6 +2609,47 @@ async function deleteUser(
   }
 
   async function handleQrScan(value: string) {
+    const ustadMatch = value.trim().match(/^ustad:(\d+)$/i);
+
+    if (qrScannerMode === "ustad") {
+      if (!ustadMatch) {
+        qrScannerError = "QR bukan milik ustad. Gunakan QR ustad dari menu Barcode.";
+        return;
+      }
+
+      const ustadId = Number(ustadMatch[1]);
+      const ustad = ustadUsers.find(user => user.id === ustadId);
+      if (!ustad) {
+        qrScannerError = "Data ustad dari QR tidak ditemukan.";
+        return;
+      }
+
+      try {
+        const { error } = await supabase
+          .from("attendance_ustad")
+          .upsert(
+            { user_id: ustadId, date: attendanceDate, status: "hadir" },
+            { onConflict: "user_id,date" }
+          );
+        if (error) throw error;
+
+        await stopQrScanner();
+        showQrScanner = false;
+        qrScannerError = "";
+        await loadUstadAttendance();
+        await loadUstadMonthlyReport();
+        showToast(`✓ Kehadiran ${ustad.full_name || ustad.username} berhasil dicatat.`);
+      } catch (error: any) {
+        qrScannerError = "Gagal menyimpan absensi ustad: " + (error?.message || "Kesalahan");
+      }
+      return;
+    }
+
+    if (ustadMatch) {
+      qrScannerError = "QR ini milik ustad. Pilih mode Scan QR Ustad.";
+      return;
+    }
+
     const userId = parseQrValue(value);
 
     if (!userId) {
@@ -2651,12 +2694,17 @@ async function deleteUser(
     showToast(`✓ ${santri.full_name || santri.username} dipilih untuk absensi.`);
   }
 
-  async function startQrScanner() {
+  async function startQrScanner(mode: "santri" | "ustad" = "santri") {
     if (!isAdmin) {
       showToast("Hanya admin yang dapat melakukan absensi.", true);
       return;
     }
+    if (!attendanceDate) {
+      showToast("Pilih tanggal absensi terlebih dahulu.", true);
+      return;
+    }
 
+    qrScannerMode = mode;
     showQrScanner = true;
     qrScannerError = "";
 
@@ -4697,14 +4745,13 @@ async function deleteUser(
             <div>
 
               <h3>
-                🆔 Barcode ID Santri
+                🆔 Barcode Santri & Ustad
               </h3>
 
               <p
                 class="sub-description"
               >
-                Setiap santri memiliki
-                barcode berdasarkan ID.
+                Setiap santri dan ustad memiliki QR pribadi untuk absensi.
               </p>
 
             </div>
@@ -4713,10 +4760,15 @@ async function deleteUser(
             <div class="barcode-header-actions">
               <button
                 class="btn-primary"
-                on:click={startQrScanner}
+                on:click={() => startQrScanner("santri")}
               >
-                📷 Scan QR Absen
+                📷 Scan QR Santri
               </button>
+              {#if isAdmin}
+                <button class="btn-primary" on:click={() => startQrScanner("ustad")}>
+                  📷 Scan QR Ustad
+                </button>
+              {/if}
 
               <button
                 class="btn-back"
@@ -4795,6 +4847,38 @@ async function deleteUser(
 
             {/if}
 
+          </div>
+
+          <div class="sub-header-row" style="margin-top:28px">
+            <div>
+              <h3>🧑‍🏫 Barcode ID Ustad</h3>
+              <p class="sub-description">QR ini digunakan admin untuk mencatat kehadiran ustad.</p>
+            </div>
+          </div>
+
+          <div class="barcode-grid">
+            {#if ustadUsers.length === 0}
+              <p class="empty-cell">Belum ada ustad.</p>
+            {:else}
+              {#each ustadUsers as ustad}
+                <div class="barcode-card">
+                  <div class="barcode-user">
+                    <div class="user-avatar">{(ustad.full_name || ustad.username).charAt(0).toUpperCase()}</div>
+                    <strong>{ustad.full_name || ustad.username}</strong>
+                  </div>
+                  <div class="qr-code-wrap">
+                    <img
+                      class="qr-code-image"
+                      src={getQrImageUrl(ustad.id, "ustad")}
+                      alt={`QR absensi ustad ${ustad.full_name || ustad.username}`}
+                      loading="lazy"
+                    />
+                  </div>
+                  <div class="barcode-number">USTAD-{ustad.id}</div>
+                  <small class="qr-hint">Scan melalui tombol Scan QR Ustad untuk mencatat hadir.</small>
+                </div>
+              {/each}
+            {/if}
           </div>
 
         </div>
@@ -5272,8 +5356,8 @@ async function deleteUser(
     <div class="modal-content qr-scanner-modal" role="dialog" aria-modal="true" aria-label="Scan QR Absensi">
       <div class="modal-header">
         <div>
-          <h3>📷 Scan QR Absensi</h3>
-          <p class="sub-description">Kamera terhubung langsung ke Chrome. Arahkan kamera belakang ke QR santri.</p>
+          <h3>📷 Scan QR Absensi {qrScannerMode === "ustad" ? "Ustad" : "Santri"}</h3>
+          <p class="sub-description">Kamera terhubung langsung ke Chrome. Arahkan kamera belakang ke QR {qrScannerMode}.</p>
         </div>
         <button class="btn-close-modal" aria-label="Tutup scanner" on:click={closeQrScanner}>✕</button>
       </div>
