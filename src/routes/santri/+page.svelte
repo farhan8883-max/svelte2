@@ -14,7 +14,7 @@
 
   type Section =
     | "home" | "keuangan" | "barcode" | "absensi" | "jadwal"
-    | "pengumuman" | "prestasi" | "spp" | "nilai";
+    | "pengumuman" | "prestasi" | "spp" | "nilai" | "ngaji";
 
   interface UserData {
     id: number;
@@ -25,8 +25,19 @@
   }
   interface Entry { id: number; date: string; amount: number; kind: "pemasukan" | "pengeluaran"; name: string; user_id: number; }
   interface Absensi { id: number; date: string; status: string; }
+  interface NgajiAttendance {
+    id: number;
+    session_id: number;
+    user_id: number;
+    tanggal: string;
+    jam_scan: string | null;
+    status: "hadir" | "izin" | "sakit" | "alpa" | string | null;
+    metode: string | null;
+    keterangan: string | null;
+    created_at: string | null;
+  }
   interface Pengumuman { id: number; title: string; content: string; created_at: string; }
-  interface SPPItem { bulan: string; key: string; tahun: number; nominal: number; status: "lunas" | "belum_lunas"; jatuh_tempo: string; }
+  interface SPPItem { bulan: string; key: string; tahun: number; status: "lunas" | "belum_lunas"; jatuh_tempo: string; }
   interface JadwalItem { hari: string; kegiatan: string; waktu: string; }
   interface PrestasiItem { tahun: string; judul: string; tingkat: string; }
   interface StudentGrade {
@@ -40,8 +51,6 @@
   interface MenuItem { section: Section | "topup"; label: string; icon: string; tone: string; }
 
   /* ===================== KONFIGURASI ===================== */
-
-  const NOMINAL_SPP = 500000;
 
   const MONTHS = [
     { name: "Januari", key: "january" }, { name: "Februari", key: "february" },
@@ -61,6 +70,7 @@
     { section: "spp", label: "SPP Santri", icon: "💳", tone: "emerald" },
     { section: "keuangan", label: "Keuangan", icon: "💼", tone: "teal" },
     { section: "absensi", label: "Absensi", icon: "📅", tone: "green" },
+    { section: "ngaji", label: "Kehadiran Ngaji", icon: "📖", tone: "emerald" },
     { section: "jadwal", label: "Jadwal", icon: "🗓️", tone: "blue" },
     { section: "pengumuman", label: "Pengumuman", icon: "📢", tone: "purple" },
     { section: "prestasi", label: "Prestasi", icon: "🏆", tone: "orange" },
@@ -108,12 +118,14 @@
 
   let entries: Entry[] = [];
   let absensiList: Absensi[] = [];
+  let ngajiAttendanceList: NgajiAttendance[] = [];
   let pengumumanList: Pengumuman[] = [];
   let sppList: SPPItem[] = [];
   let nilaiList: StudentGrade[] = [];
 
   let loadingEntries = false;
   let loadingAbsensi = false;
+  let loadingNgajiAttendance = false;
   let loadingSPP = false;
   let loadingPengumuman = false;
   let loadingNilai = false;
@@ -145,9 +157,13 @@
   $: activeEntries = keuanganTab === "pemasukan" ? pemasukan : pengeluaran;
   $: activeTotal = keuanganTab === "pemasukan" ? totalPemasukan : totalPengeluaran;
 
+  $: ngajiHadir = ngajiAttendanceList.filter((a) => a.status === "hadir").length;
+  $: ngajiIzin = ngajiAttendanceList.filter((a) => a.status === "izin").length;
+  $: ngajiSakit = ngajiAttendanceList.filter((a) => a.status === "sakit").length;
+  $: ngajiAlpa = ngajiAttendanceList.filter((a) => a.status === "alpa").length;
+
   $: sppLunas = sppList.filter((s) => s.status === "lunas");
   $: sppBelumLunas = sppList.filter((s) => s.status === "belum_lunas");
-  $: totalTunggakan = sppBelumLunas.reduce((t, s) => t + s.nominal, 0);
   $: filteredSPP = sppTab === "semua" ? sppList : sppList.filter((s) => s.status === sppTab);
 
   $: unreadCount = notifications.filter((n) => !seenIds.has(n.id)).length;
@@ -157,6 +173,16 @@
 
   function formatRupiah(value: number): string {
     return new Intl.NumberFormat("id-ID").format(value || 0);
+  }
+
+  function formatJamScan(value: string | null): string {
+    if (!value) return "-";
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return value;
+    return d.toLocaleString("id-ID", {
+      day: "2-digit", month: "short", year: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: false
+    });
   }
 
   function formatTanggal(value: string): string {
@@ -225,6 +251,18 @@
       loadAbsensi();
     });
 
+    listen("ngaji_attendance", true, (p) => {
+      const row = p.new || p.old || {};
+      if (p.eventType !== "DELETE") {
+        notify(
+          verb(p, "Kehadiran ngaji tercatat", "Kehadiran ngaji diperbarui"),
+          `Status ngaji kamu: ${row.status || "diperbarui"}.`,
+          "ngaji"
+        );
+      }
+      loadNgajiAttendance();
+    });
+
     listen("student_grades", true, (p) => {
       const row = p.new || {};
       notify(
@@ -280,16 +318,26 @@
 
   /* ===================== LIFECYCLE ===================== */
 
-  onMount(() => {
+  onMount(async () => {
     loadUser();
 
-    if (!user) {
-      goto("/");
+    if (!user?.id) {
+      await goto("/");
       return;
     }
 
-    Promise.all([loadEntries(), loadAbsensi(), loadSPP(), loadPengumuman(), loadNilai()]);
-    setupRealtime();
+    // Muat data setelah identitas santri berhasil dibaca.
+    await Promise.allSettled([
+      loadEntries(),
+      loadAbsensi(),
+      loadNgajiAttendance(),
+      loadSPP(),
+      loadPengumuman(),
+      loadNilai()
+    ]);
+
+    // Realtime hanya dibuat untuk akun yang valid.
+    if (user?.id) setupRealtime();
     startBannerAutoplay();
   });
 
@@ -334,6 +382,31 @@
     absensiList = (data || []) as Absensi[];
   }
 
+  // Riwayat ngaji selalu dibatasi ke ID santri yang sedang login.
+  async function loadNgajiAttendance() {
+    if (!user?.id) return;
+    loadingNgajiAttendance = true;
+    try {
+      const { data, error } = await supabase
+        .from("ngaji_attendance")
+        .select("id, session_id, user_id, tanggal, jam_scan, status, metode, keterangan, created_at")
+        .eq("user_id", user.id)
+        .order("tanggal", { ascending: false })
+        .order("jam_scan", { ascending: false });
+
+      if (error) {
+        fail("Gagal memuat kehadiran ngaji", error);
+        return;
+      }
+      ngajiAttendanceList = (data || []) as NgajiAttendance[];
+    } catch (error) {
+      console.error("Gagal memuat kehadiran ngaji:", error);
+      message = "Terjadi kesalahan saat memuat kehadiran ngaji.";
+    } finally {
+      loadingNgajiAttendance = false;
+    }
+  }
+
   async function loadPengumuman() {
     loadingPengumuman = true;
     const { data, error } = await supabase
@@ -365,35 +438,47 @@
     if (!user?.id) return;
     loadingSPP = true;
 
-    let { data, error } = await supabase
-      .from("spp_payments")
-      .select("*")
-      .eq("user_id", user.id)
-      .eq("year", currentYear)
-      .maybeSingle();
-
-    if (error) {
-      fail("Gagal memuat SPP", error);
-    } else if (!data) {
-      const res = await supabase
+    try {
+      const { data: existing, error } = await supabase
         .from("spp_payments")
-        .insert({ user_id: user.id, year: currentYear })
-        .select()
-        .single();
-      if (res.error) fail("Gagal membuat data SPP", res.error);
-      else data = res.data;
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("year", currentYear)
+        .maybeSingle();
+
+      if (error) {
+        fail("Gagal memuat SPP", error);
+        return;
+      }
+
+      let paymentData = existing;
+      if (!paymentData) {
+        const { data: created, error: insertError } = await supabase
+          .from("spp_payments")
+          .insert({ user_id: user.id, year: currentYear })
+          .select()
+          .single();
+
+        if (insertError) {
+          fail("Gagal membuat data SPP", insertError);
+          return;
+        }
+        paymentData = created;
+      }
+
+      sppList = MONTHS.map((m) => ({
+        bulan: m.name,
+        key: m.key,
+        tahun: currentYear,
+        status: paymentData?.[m.key] === true ? "lunas" : "belum_lunas",
+        jatuh_tempo: `10 ${m.name} ${currentYear}`
+      }));
+    } catch (error) {
+      console.error("Gagal memuat SPP:", error);
+      message = "Gagal memuat data SPP. Silakan coba lagi.";
+    } finally {
+      loadingSPP = false;
     }
-
-    sppList = MONTHS.map((m) => ({
-      bulan: m.name,
-      key: m.key,
-      tahun: currentYear,
-      nominal: NOMINAL_SPP,
-      status: data && data[m.key] === true ? "lunas" : "belum_lunas",
-      jatuh_tempo: `10 ${m.name} ${currentYear}`
-    }));
-
-    loadingSPP = false;
   }
 
   /* ===================== QR ===================== */
@@ -437,6 +522,7 @@
     if (section === "barcode") await generateStudentQR();
     else if (section === "pengumuman") await loadPengumuman();
     else if (section === "absensi") await loadAbsensi();
+    else if (section === "ngaji") await loadNgajiAttendance();
     else if (section === "spp") await loadSPP();
     else if (section === "nilai") await loadNilai();
     else if (section === "keuangan") await loadEntries();
@@ -526,56 +612,6 @@
   .ttd{width:220px}.ttd-space{height:70px}
   .print-btn{position:fixed;top:15px;right:15px;padding:10px 14px;cursor:pointer}
   @media print{.print-btn{display:none}body{margin:15mm}}
-
-  /* ===== FULL SCREEN / NO WHITE EDGES ===== */
-  :global(html),
-  :global(body),
-  :global(#svelte) {
-    width: 100%;
-    min-width: 100%;
-    min-height: 100%;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-
-  :global(html) {
-    background: #edf1f8;
-    overflow-x: hidden;
-  }
-
-  :global(body) {
-    background: #edf1f8;
-    overflow-x: hidden;
-  }
-
-  :global(*) {
-    box-sizing: border-box;
-  }
-
-  .mybca-app {
-    width: 100%;
-    min-width: 100%;
-    min-height: 100vh;
-    min-height: 100dvh;
-    margin: 0;
-    padding-top: 0;
-    overflow-x: hidden;
-  }
-
-  .app-header {
-    width: 100%;
-  }
-
-  .app-body {
-    width: 100%;
-  }
-
-  @media (max-width: 599px) {
-    .mybca-app {
-      width: 100%;
-      min-height: 100dvh;
-    }
-  }
 
 </style></head><body>
 <button class="print-btn" onclick="window.print()">Cetak / Simpan PDF</button>
@@ -852,10 +888,6 @@
             <span class="stat-label">Belum dibayar</span>
             <span class="stat-val text-red">{sppBelumLunas.length} bulan</span>
           </div>
-          <div class="spp-card-stat bg-blue-light">
-            <span class="stat-label">Total tunggakan</span>
-            <span class="stat-val text-blue">Rp {formatRupiah(totalTunggakan)}</span>
-          </div>
         </div>
 
         <div class="tab-header">
@@ -875,7 +907,6 @@
                 <div class="spp-item-info">
                   <div class="spp-month">{item.bulan} {item.tahun}</div>
                   <div class="spp-subinfo">
-                    <span>Nominal: <b>Rp {formatRupiah(item.nominal)}</b></span>
                     {#if item.status !== "lunas"}
                       <span class="text-red">• Jatuh tempo: {item.jatuh_tempo}</span>
                     {/if}
@@ -1087,6 +1118,67 @@
             </table>
           </div>
         {/if}
+      </div>
+    {/if}
+
+    <!-- ===== KEHADIRAN NGAJI ===== -->
+    {#if activeSection === "ngaji"}
+      <div class="page-card">
+        <div class="section-heading-row">
+          <div>
+            <h3>Riwayat kehadiran ngaji</h3>
+            <p class="sub-desc">Catatan presensi ngaji khusus akun santri yang sedang login.</p>
+          </div>
+          <button class="ngaji-reload-btn" type="button" on:click={loadNgajiAttendance} disabled={loadingNgajiAttendance}>
+            {loadingNgajiAttendance ? "Memuat..." : "↻ Muat ulang"}
+          </button>
+        </div>
+
+        <div class="ngaji-attendance-summary">
+          <div class="ngaji-stat"><strong>{ngajiAttendanceList.length}</strong><span>Total pertemuan</span></div>
+          <div class="ngaji-stat"><strong>{ngajiHadir}</strong><span>Hadir</span></div>
+          <div class="ngaji-stat"><strong>{ngajiIzin}</strong><span>Izin</span></div>
+          <div class="ngaji-stat"><strong>{ngajiSakit}</strong><span>Sakit</span></div>
+          <div class="ngaji-stat"><strong>{ngajiAlpa}</strong><span>Alpa</span></div>
+        </div>
+
+        {#if loadingNgajiAttendance}
+          <p class="empty-msg">Memuat riwayat kehadiran ngaji...</p>
+        {:else if ngajiAttendanceList.length === 0}
+          <p class="empty-msg">Belum ada catatan kehadiran ngaji untuk akun ini.</p>
+        {:else}
+          <div class="table-container">
+            <table class="app-table wide">
+              <thead>
+                <tr>
+                  <th>Tanggal</th>
+                  <th>Waktu scan</th>
+                  <th>Sesi</th>
+                  <th>Status</th>
+                  <th>Metode</th>
+                  <th>Keterangan</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each ngajiAttendanceList as item (item.id)}
+                  <tr>
+                    <td>{formatTanggal(item.tanggal)}</td>
+                    <td>{formatJamScan(item.jam_scan)}</td>
+                    <td>#{item.session_id}</td>
+                    <td>
+                      <span class="badge-status" class:ngaji-hadir={item.status === "hadir"} class:ngaji-izin={item.status === "izin"} class:ngaji-sakit={item.status === "sakit"} class:ngaji-alpa={item.status === "alpa"}>
+                        {item.status ? item.status.charAt(0).toUpperCase() + item.status.slice(1) : "-"}
+                      </span>
+                    </td>
+                    <td>{item.metode || "-"}</td>
+                    <td>{item.keterangan || "-"}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+        <p class="ngaji-private-note">Data yang ditampilkan difilter berdasarkan ID akun santri.</p>
       </div>
     {/if}
 
@@ -1888,6 +1980,47 @@
     font-weight: 700;
   }
 
+  .section-heading-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .ngaji-reload-btn {
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    padding: 9px 13px;
+    color: var(--text);
+    background: var(--surface-2);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .ngaji-reload-btn:disabled { opacity: 0.55; cursor: wait; }
+  .ngaji-attendance-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+    gap: 10px;
+    margin: 14px 0 22px;
+  }
+  .ngaji-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px;
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    background: var(--surface, rgba(127, 148, 180, 0.06));
+  }
+  .ngaji-stat strong { font-size: 1.35rem; font-weight: 800; }
+  .ngaji-stat span { color: var(--muted); font-size: 0.76rem; }
+  .ngaji-private-note { margin: 14px 0 0; color: var(--faint); font-size: 0.76rem; }
+  .badge-status.ngaji-hadir { background: #dcfce7; color: #166534; }
+  .badge-status.ngaji-izin { background: #dbeafe; color: #1d4ed8; }
+  .badge-status.ngaji-sakit { background: #fef3c7; color: #92400e; }
+  .badge-status.ngaji-alpa { background: #fee2e2; color: #991b1b; }
   .empty-msg { color: var(--faint); font-size: 0.88rem; text-align: center; padding: 32px 0; }
 
   /* ===== QR SANTRI (KARTU ID) ===== */
