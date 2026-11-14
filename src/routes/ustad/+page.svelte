@@ -1517,7 +1517,6 @@
             <span>🌙 Gelap</span>
           {/if}
         </button>
-        <span class="badge-role">{currentUser?.role?.toUpperCase() || "STAFF"}</span>
       </div>
     </header>
 
