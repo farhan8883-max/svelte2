@@ -41,33 +41,6 @@
     nilai_akhir?: number | null;
   }
 
-  interface Entry {
-    id: number;
-    date: string;
-    amount: number;
-    kind: "pemasukan" | "pengeluaran";
-    name: string;
-    user_id: number;
-  }
-
-  interface SPPRecord {
-    id?: number;
-    user_id: number;
-    year: number;
-    january: boolean;
-    february: boolean;
-    march: boolean;
-    april: boolean;
-    may: boolean;
-    june: boolean;
-    july: boolean;
-    august: boolean;
-    september: boolean;
-    october: boolean;
-    november: boolean;
-    december: boolean;
-  }
-
   interface NgajiSession {
     id: number;
     nama_sesi: string;
@@ -97,8 +70,6 @@
 
   type AttendanceStatus = Attendance["status"] | "";
 
-  let attendanceDrafts: Record<number, AttendanceStatus> = {};
-
   interface Schedule {
     id?: number;
     day: string;
@@ -118,15 +89,12 @@
 
   type ActiveView =
     | "home"
-    | "spp"
-    | "users"
     | "attendance"
     | "attendanceScan"
     | "ngajiScan"
     | "schedule"
     | "grades"
     | "barcode"
-    | "topup"
     | "announcement";
 
   /* =========================
@@ -150,11 +118,10 @@
 
   let currentUser: User | null = null;
   let users: User[] = [];
-  let entries: Entry[] = [];
   let schedules: Schedule[] = [];
   let attendanceData: Attendance[] = [];
   let announcements: Announcement[] = [];
-  let sppData: Record<number, SPPRecord> = {};
+  let attendanceDrafts: Record<number, AttendanceStatus> = {};
 
   /* =========================
      GRADE / REKAP NILAI
@@ -203,12 +170,33 @@
   let selectedStudentForClass = "";
   let selectedClassForStudent = "";
 
+  /* =========================
+     TOAST
+  ========================= */
   let message = "";
   let isError = false;
   let toastTimer: ReturnType<typeof setTimeout>;
 
-  let attendanceDate = new Date().toISOString().split("T")[0];
+  function showToast(msg: string, error = false) {
+    message = msg;
+    isError = error;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { message = ""; }, 3200);
+  }
 
+  const getLocalDateValue = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+
+  let attendanceDate = getLocalDateValue();
+
+  /* =========================
+     QR SCANNER STATE
+  ========================= */
   let qrCodes: Record<number, string> = {};
   let qrScanner: Html5Qrcode | null = null;
   let qrScannerRunning = false;
@@ -219,16 +207,11 @@
   let qrScanMessage = "";
   let cameraError = "";
 
-  // NGAJI STATES
+  /* =========================
+     NGAJI STATE
+  ========================= */
   let ngajiSessions: NgajiSession[] = [];
   let selectedNgajiSessionId = "";
-  const getLocalDateValue = () => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const day = String(now.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  };
   let selectedNgajiDate = getLocalDateValue();
   const DEFAULT_NGAJI_SESSIONS = [
     { nama_sesi: "Subuh", waktu_mulai: "04:00", waktu_selesai: "05:30" },
@@ -244,7 +227,7 @@
   let ngajiScanMessage = "";
   let ngajiSessionsLoading = false;
 
-  // Sub-tab di dalam menu Ngaji: "scan" (QR Scanner) atau "manual" (Presensi Manual)
+  // Sub-tab di menu Ngaji: "scan" (QR Scanner) atau "manual" (Presensi Manual)
   let ngajiActiveSubTab: "scan" | "manual" = "manual";
 
   async function loadNgajiSessions() {
@@ -357,7 +340,7 @@
     }
   }
 
-  // Mendapatkan status ngaji seorang santri berdasarkan sesi terpilih
+  // Status ngaji seorang santri pada sesi terpilih
   function getNgajiStudentStatus(userId: number): AttendanceStatus {
     const row = ngajiAttendanceRows.find(r => Number(r.user_id) === Number(userId));
     return row ? (row.status as AttendanceStatus) : "";
@@ -370,10 +353,10 @@
     sakit: ngajiAttendanceRows.filter(r => r.status === "sakit").length,
     alpha: ngajiAttendanceRows.filter(r => r.status === "alpha").length,
     pulang: ngajiAttendanceRows.filter(r => r.status === "pulang").length,
-    belum: santriUsers.length - ngajiAttendanceRows.length
+    belum: Math.max(0, santriUsers.length - ngajiAttendanceRows.length)
   };
 
-  // Simpan / Update Absensi Ngaji Manual (Hadir, Izin, Sakit, Alpha, Pulang)
+  // Simpan / update absensi ngaji manual
   async function saveNgajiAttendanceManual(userId: number, status: AttendanceStatus) {
     if (!canManageAttendance) {
       showToast("Hanya ustadz atau admin yang dapat mencatat absensi.", true);
@@ -387,7 +370,7 @@
     const student = santriUsers.find(u => u.id === userId);
     const existing = ngajiAttendanceRows.find(row => Number(row.user_id) === Number(userId));
 
-    // Jika status dikosongkan (pilih '-- Belum --'), hapus rekap jika ada
+    // Jika status dikosongkan, hapus rekap bila ada
     if (!status && existing) {
       const { error } = await supabase.from("ngaji_attendance").delete().eq("id", existing.id);
       if (error) {
@@ -431,6 +414,9 @@
     return name.includes(keyword) || uname.includes(keyword) || kls.includes(keyword);
   });
 
+  /* =========================
+     EXPORT REKAP ABSENSI
+  ========================= */
   async function fetchAllRows(table: "attendance" | "ngaji_attendance" | "ngaji_sessions", columns: string, orderColumn: string) {
     const pageSize = 1000;
     let allRows: any[] = [];
@@ -476,7 +462,7 @@
       for (const date of schoolDates) {
         const dailyRows = schoolDetail.slice(1).filter(row => row[0] === date);
         const counts = statusLabels.map(status => dailyRows.filter(row => String(row[4]).toLowerCase() === status).length);
-        schoolSummary.push([date, ...counts.slice(0, 5), counts[5], santriUsers.length]);
+        schoolSummary.push([date, ...counts, santriUsers.length]);
       }
 
       const ngajiDetail: any[][] = [["Tanggal", "Sesi", "Waktu", "Nama Santri", "Username", "Status", "Metode Absen"]];
@@ -507,13 +493,16 @@
       addSheet("Rekap Ngaji", ngajiSummary);
       addSheet("Detail Ngaji", ngajiDetail);
       XLSX.writeFile(workbook, `rekap-absensi-santri-${getLocalDateValue()}.xlsx`);
-      showToast(`Export berhasil disiapkan.`);
+      showToast("Export berhasil disiapkan.");
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       showToast("Gagal mengekspor data: " + detail, true);
     }
   }
 
+  /* =========================
+     QR: ABSENSI NGAJI & SEKOLAH
+  ========================= */
   async function saveNgajiAttendanceFromQR(userId: number) {
     if (!canManageAttendance) {
       showToast("Akses scanner khusus admin/ustad.", true);
@@ -777,6 +766,9 @@
   let selectedAttendanceGroup: "SD" | "SMP" | "SMA" = "SMP";
   let selectedSmpGrade: "1" | "2" | "3" = "1";
 
+  /* =========================
+     JADWAL & PENGUMUMAN STATE
+  ========================= */
   let showScheduleModal = false;
   let editingScheduleId: number | null = null;
   let scheduleDay = "";
@@ -810,17 +802,27 @@
       return;
     }
     try {
-      currentUser = JSON.parse(storedUser);
+      const parsedUser = JSON.parse(storedUser) as Partial<User>;
+
+      // Hanya akun dengan role "ustad" yang boleh membuka dashboard ini.
+      // Admin, santri, role tidak dikenal, atau data user tidak valid akan ditolak.
+      if (!parsedUser || parsedUser.role !== "ustad" || !parsedUser.id || !parsedUser.username) {
+        localStorage.removeItem("user");
+        currentUser = null;
+        await goto("/login");
+        return;
+      }
+
+      currentUser = parsedUser as User;
     } catch {
       localStorage.removeItem("user");
-      goto("/login");
+      currentUser = null;
+      await goto("/login");
       return;
     }
 
     await Promise.all([
       loadUsers(),
-      loadEntries(),
-      loadSPPData(),
       loadAttendance(),
       loadSchedules(),
       loadAnnouncements(),
@@ -831,12 +833,20 @@
 
   $: santriUsers = users.filter(user => user.role === "santri");
 
+  // Cocokkan kata utuh agar "mi" tidak salah cocok dengan kata seperti "kimia"
+  function hasWord(text: string, words: string[]) {
+    return new RegExp(`(^|[^a-z])(${words.join("|")})([^a-z]|$)`, "i").test(text);
+  }
+
+  function getClassText(user: User) {
+    return (user.class_name || user.kelas || classes.find(item => item.id === Number(user.class_id))?.name || "").toLowerCase();
+  }
+
   function getEducationGroup(user: User): "SD" | "SMP" | "SMA" | null {
-    const classRoomName = user.class_name || user.kelas || classes.find(item => item.id === Number(user.class_id))?.name || "";
-    const classText = classRoomName.toLowerCase();
-    if (classText.includes("sma") || classText.includes("smk") || classText.includes("aliyah")) return "SMA";
-    if (classText.includes("smp") || classText.includes("mts")) return "SMP";
-    if (classText.includes("sd") || classText.includes("mi")) return "SD";
+    const classText = getClassText(user);
+    if (hasWord(classText, ["sma", "smk", "aliyah", "ma"])) return "SMA";
+    if (hasWord(classText, ["smp", "mts"])) return "SMP";
+    if (hasWord(classText, ["sd", "mi"])) return "SD";
 
     const match = classText.match(/\b(\d{1,2})\b/);
     const gradeNumber = match ? Number(match[1]) : NaN;
@@ -847,14 +857,13 @@
   }
 
   function getSmpGradeNumber(user: User): "1" | "2" | "3" | null {
-    const classRoomName = user.class_name || user.kelas || classes.find(item => item.id === Number(user.class_id))?.name || "";
-    const text = classRoomName.toLowerCase();
+    const text = getClassText(user);
 
     if (/\bvii\b/i.test(text) || /\b7\b/.test(text) || /\bkelas\s*1\b/i.test(text) || /\bsmp\s*1\b/i.test(text)) return "1";
     if (/\bviii\b/i.test(text) || /\b8\b/.test(text) || /\bkelas\s*2\b/i.test(text) || /\bsmp\s*2\b/i.test(text)) return "2";
     if (/\bix\b/i.test(text) || /\b9\b/.test(text) || /\bkelas\s*3\b/i.test(text) || /\bsmp\s*3\b/i.test(text)) return "3";
 
-    const match = text.match(/\b([1-3|7-9])\b/);
+    const match = text.match(/\b([1-37-9])\b/);
     if (match) {
       const val = Number(match[1]);
       if (val === 1 || val === 7) return "1";
@@ -906,6 +915,9 @@
   $: isAdmin = currentUser?.role === "admin";
   $: canManageAttendance = currentUser?.role === "admin" || currentUser?.role === "ustad";
 
+  /* =========================
+     ATUR KELAS SANTRI
+  ========================= */
   function openStudentClassModal() {
     if (!canManageAttendance) return;
     selectedStudentForClass = "";
@@ -937,6 +949,9 @@
     await loadUsers();
   }
 
+  /* =========================
+     LOAD DATA
+  ========================= */
   async function loadUsers() {
     const { data, error } = await supabase
       .from("users")
@@ -969,6 +984,9 @@
     await Promise.all([loadUsers(), loadClasses(), loadGrades()]);
   }
 
+  /* =========================
+     NILAI: FORM, SIMPAN, EXPORT
+  ========================= */
   function resetGradeForm() {
     editingGradeId = null;
     gradeClassId = "";
@@ -1091,6 +1109,15 @@
     return result;
   }
 
+  function getGradeAverage(grade: StudentGrade) {
+    if (grade.nilai_akhir !== null && grade.nilai_akhir !== undefined) {
+      return Number(grade.nilai_akhir).toFixed(2);
+    }
+    const vals = [grade.nilai_tugas, grade.nilai_ulangan_harian, grade.nilai_pts, grade.nilai_pas, grade.nilai_sikap_karakter, grade.nilai_ujian_sekolah];
+    const total = vals.reduce((s, v) => s + Number(v ?? 0), 0);
+    return (total / 6).toFixed(2);
+  }
+
   function exportGradesToExcel() {
     if (!filteredGrades.length) {
       showToast("Tidak ada data nilai untuk diekspor.", true);
@@ -1192,31 +1219,9 @@
     }
   }
 
-  function getGradeAverage(grade: StudentGrade) {
-    if (grade.nilai_akhir !== null && grade.nilai_akhir !== undefined) {
-      return Number(grade.nilai_akhir).toFixed(2);
-    }
-    const vals = [grade.nilai_tugas, grade.nilai_ulangan_harian, grade.nilai_pts, grade.nilai_pas, grade.nilai_sikap_karakter, grade.nilai_ujian_sekolah];
-    const total = vals.reduce((s, v) => s + Number(v ?? 0), 0);
-    return (total / 6).toFixed(2);
-  }
-
-  async function loadEntries() {
-    const { data } = await supabase.from("entries").select("*").order("id", { ascending: false });
-    if (data) {
-      entries = data as Entry[];
-    }
-  }
-
-  async function loadSPPData() {
-    const { data } = await supabase.from("spp_payments").select("*").eq("year", new Date().getFullYear());
-    if (data) {
-      const map: Record<number, SPPRecord> = {};
-      (data as SPPRecord[]).forEach(item => { map[Number(item.user_id)] = { ...item, user_id: Number(item.user_id) }; });
-      sppData = map;
-    }
-  }
-
+  /* =========================
+     ABSENSI SEKOLAH
+  ========================= */
   async function loadAttendance() {
     const { data } = await supabase.from("attendance").select("*").eq("date", attendanceDate).order("id", { ascending: false });
     if (data) {
@@ -1247,18 +1252,21 @@
 
   $: attendanceDraftGroup = attendanceStudents.map(santri => ({
     student: santri,
-    status: getDraftAttendance(santri.id)
+    status: attendanceDrafts[santri.id] ?? ""
   }));
 
   $: attendanceDraftSummary = {
-  hadir: attendanceDraftGroup.filter(i => i.status === "hadir").length,
-  izin: attendanceDraftGroup.filter(i => i.status === "izin").length,
-  sakit: attendanceDraftGroup.filter(i => i.status === "sakit").length,
-  alpha: attendanceDraftGroup.filter(i => i.status === "alpha").length,
-  pulang: attendanceDraftGroup.filter(i => i.status === "pulang").length, // <-- Ditambahkan
-  belum: attendanceDraftGroup.filter(i => !i.status).length
-};
+    hadir: attendanceDraftGroup.filter(i => i.status === "hadir").length,
+    izin: attendanceDraftGroup.filter(i => i.status === "izin").length,
+    sakit: attendanceDraftGroup.filter(i => i.status === "sakit").length,
+    alpha: attendanceDraftGroup.filter(i => i.status === "alpha").length,
+    pulang: attendanceDraftGroup.filter(i => i.status === "pulang").length,
+    belum: attendanceDraftGroup.filter(i => !i.status).length
+  };
 
+  /* =========================
+     JADWAL
+  ========================= */
   async function loadSchedules() {
     const { data } = await supabase.from("schedules").select("*").order("id", { ascending: true });
     if (data) schedules = data as Schedule[];
@@ -1287,7 +1295,10 @@
   }
 
   async function saveSchedule() {
-    if (!isAdmin || !scheduleDay || !scheduleSubject || !scheduleTime) return;
+    if (!isAdmin || !scheduleDay || !scheduleSubject || !scheduleTime) {
+      showToast("Hari, mata pelajaran, dan waktu wajib diisi.", true);
+      return;
+    }
     const payload = {
       day: scheduleDay,
       subject: scheduleSubject.trim(),
@@ -1299,11 +1310,13 @@
       ? await supabase.from("schedules").update(payload).eq("id", editingScheduleId)
       : await supabase.from("schedules").insert([payload]);
 
-    if (!error) {
-      showToast("Jadwal tersimpan.");
-      showScheduleModal = false;
-      await loadSchedules();
+    if (error) {
+      showToast("Gagal menyimpan jadwal: " + error.message, true);
+      return;
     }
+    showToast("Jadwal tersimpan.");
+    showScheduleModal = false;
+    await loadSchedules();
   }
 
   async function deleteSchedule(id: number) {
@@ -1319,6 +1332,9 @@
     return users.find(u => u.id === Number(tId))?.username || "-";
   }
 
+  /* =========================
+     PENGUMUMAN
+  ========================= */
   async function loadAnnouncements() {
     const { data, error } = await supabase
       .from("announcements")
@@ -1383,13 +1399,9 @@
     }
   }
 
-  function showToast(msg: string, error = false) {
-    message = msg;
-    isError = error;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { message = ""; }, 3200);
-  }
-
+  /* =========================
+     HELPER UMUM
+  ========================= */
   function formatDate(val?: string) {
     return val ? new Date(val).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "-";
   }
@@ -1399,12 +1411,118 @@
     return labels[status] || status;
   }
 
-  function logout() {
+  /* =========================
+     MODAL DAFTAR NAMA PER STATUS (BISA DISALIN)
+  ========================= */
+  let showStatusModal = false;
+  let statusModalTitle = "";
+  let statusModalSubtitle = "";
+  let statusModalStatus = "";
+  let statusModalNames: string[] = [];
+  let statusCopied = false;
+  let statusCopiedTimer: ReturnType<typeof setTimeout>;
+
+  function openStatusModal(source: "sekolah" | "ngaji", status: string) {
+    let names: string[] = [];
+    let subtitle = "";
+
+    if (source === "sekolah") {
+      names = attendanceDraftGroup
+        .filter(i => (status === "belum" ? !i.status : i.status === status))
+        .map(i => i.student.full_name || i.student.username);
+
+      const grupLabel =
+        selectedAttendanceGroup === "SMP"
+          ? `SMP Kelas ${selectedSmpGrade}`
+          : selectedAttendanceGroup;
+      subtitle = `Absensi Sekolah • ${grupLabel} • ${formatDate(attendanceDate)}`;
+    } else {
+      // Semua santri (tidak ikut kolom pencarian) agar daftar selalu lengkap
+      names = santriUsers
+        .filter(s => {
+          const st = getNgajiStudentStatus(s.id);
+          return status === "belum" ? !st : st === status;
+        })
+        .map(s => s.full_name || s.username);
+
+      const sesi = ngajiSessions.find(x => String(x.id) === String(selectedNgajiSessionId));
+      subtitle = `Absensi Ngaji • ${sesi ? sesi.nama_sesi : "-"} • ${formatDate(selectedNgajiDate)}`;
+    }
+
+    statusModalStatus = status;
+    statusModalTitle = status === "belum" ? "Belum Absen" : attendanceLabel(status);
+    statusModalSubtitle = subtitle;
+    statusModalNames = names.sort((a, b) => a.localeCompare(b, "id"));
+    statusCopied = false;
+    showStatusModal = true;
+  }
+
+  function closeStatusModal() {
+    showStatusModal = false;
+  }
+
+  function buildStatusText() {
+    const header = `${statusModalTitle} (${statusModalNames.length} santri)\n${statusModalSubtitle}`;
+    const list = statusModalNames.map((n, i) => `${i + 1}. ${n}`).join("\n");
+    return `${header}\n\n${list}`;
+  }
+
+  async function copyStatusNames() {
+    if (!statusModalNames.length) {
+      showToast("Tidak ada nama untuk disalin.", true);
+      return;
+    }
+    const text = buildStatusText();
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      statusCopied = true;
+      showToast("✓ Daftar nama berhasil disalin.");
+      clearTimeout(statusCopiedTimer);
+      statusCopiedTimer = setTimeout(() => (statusCopied = false), 2000);
+    } catch {
+      showToast("Gagal menyalin. Coba salin manual.", true);
+    }
+  }
+
+  function handleWindowKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    if (showStatusModal) showStatusModal = false;
+    else if (showGradeModal) showGradeModal = false;
+    else if (showStudentClassModal) showStudentClassModal = false;
+    else if (showAnnouncementModal) showAnnouncementModal = false;
+    else if (showScheduleModal) showScheduleModal = false;
+  }
+
+  /* =========================
+     NAVIGASI
+  ========================= */
+  async function logout() {
+    // Hentikan kamera bila sedang aktif sebelum mengakhiri sesi.
+    await stopQRScanner();
     localStorage.removeItem("user");
-    goto("/login");
+    currentUser = null;
+    sidebarOpen = false;
+    await goto("/login");
   }
 
   async function changeView(view: ActiveView) {
+    // Lapisan pemeriksaan tambahan agar role selain ustad tidak dapat
+    // berpindah menu meskipun fungsi navigasi dipanggil dari kode lain.
+    if (currentUser?.role !== "ustad") {
+      await logout();
+      return;
+    }
     if ((activeView === "attendanceScan" || activeView === "ngajiScan") && view !== activeView) {
       await stopQRScanner();
     }
@@ -1429,9 +1547,13 @@
   }
 
   onDestroy(() => {
+    clearTimeout(toastTimer);
+    clearTimeout(statusCopiedTimer);
     void stopQRScanner();
   });
 </script>
+
+<svelte:window on:keydown={handleWindowKeydown} />
 
 <!-- =========================
      APP LAYOUT WITH THEME
@@ -1472,11 +1594,6 @@
       <button class:active={activeView === "announcement"} on:click={() => changeView("announcement")}>
         <span class="nav-ico">📢</span> Pengumuman
       </button>
-      {#if isAdmin}
-        <button class:active={activeView === "users"} on:click={() => changeView("users")}>
-          <span class="nav-ico">👥</span> Kelola User
-        </button>
-      {/if}
       <button class:active={activeView === "barcode"} on:click={() => changeView("barcode")}>
         <span class="nav-ico">🆔</span> Barcode Santri
       </button>
@@ -1509,7 +1626,6 @@
         </div>
       </div>
       <div class="topbar-right">
-        <!-- THEME TOGGLE BUTTON -->
         <button class="theme-toggle-btn" on:click={toggleTheme} title="Ganti Mode Terang / Gelap">
           {#if theme === "dark"}
             <span>☀️ Terang</span>
@@ -1542,11 +1658,13 @@
               <span class="tag-status">Presensi & Akademik Terpadu</span>
               <h2>Pondok Pesantren Daarulhikam</h2>
               <p>Kelola absensi santri, kegiatan ngaji halaqah (scan & manual), dan evaluasi nilai dalam satu sistem terpadu.</p>
-              
+
               <div class="hero-actions">
-                <button class="btn-hero primary" on:click={() => changeView("attendanceScan")}>
-                  <span>📷</span> Scan Sekolah
-                </button>
+                {#if canManageAttendance}
+                  <button class="btn-hero primary" on:click={() => changeView("attendanceScan")}>
+                    <span>📷</span> Scan Sekolah
+                  </button>
+                {/if}
                 <button class="btn-hero emerald" on:click={() => changeView("ngajiScan")}>
                   <span>📖</span> Presensi Ngaji
                 </button>
@@ -1592,10 +1710,12 @@
           <div class="sheet-head">
             <div>
               <h2>Presensi Manual Sekolah</h2>
-              <p>Pilih jenjang pendidikan dan sesuaikan status kehadiran santri.</p>
+              <p>Pilih jenjang pendidikan dan sesuaikan status kehadiran santri. Tekan kotak ringkasan untuk melihat dan menyalin daftar nama.</p>
             </div>
             <div class="flex-actions">
-              <button class="btn-cta mini green" on:click={exportAttendanceRecapExcel}>📥 Export Rekap</button>
+              {#if canManageAttendance}
+                <button class="btn-cta mini green" on:click={exportAttendanceRecapExcel}>📥 Export Rekap</button>
+              {/if}
               <button class="btn-round-close" on:click={() => changeView("home")}>✕</button>
             </div>
           </div>
@@ -1606,7 +1726,6 @@
               <input type="date" bind:value={attendanceDate} on:change={changeAttendanceDate} />
             </div>
 
-            <!-- TAB TINGKAT UMUM -->
             <div class="tab-segments">
               <button class:active={selectedAttendanceGroup === "SD"} on:click={() => { selectedAttendanceGroup = "SD"; }}>
                 SD ({attendanceGroupCounts.SD})
@@ -1620,41 +1739,32 @@
             </div>
           </div>
 
-          <!-- SUB-TAB KHUSUS SMP KELAS 1, 2, 3 -->
           {#if selectedAttendanceGroup === "SMP"}
             <div class="smp-subnav-panel">
               <span class="subnav-title">Pilih Kelas SMP:</span>
               <div class="smp-classes-bar">
-                <button
-                  class:active={selectedSmpGrade === "1"}
-                  on:click={() => (selectedSmpGrade = "1")}
-                >
+                <button class:active={selectedSmpGrade === "1"} on:click={() => (selectedSmpGrade = "1")}>
                   🏫 SMP Kelas 1 (VII) • <span class="badge-count">{smpCountClass1}</span>
                 </button>
-                <button
-                  class:active={selectedSmpGrade === "2"}
-                  on:click={() => (selectedSmpGrade = "2")}
-                >
+                <button class:active={selectedSmpGrade === "2"} on:click={() => (selectedSmpGrade = "2")}>
                   🏫 SMP Kelas 2 (VIII) • <span class="badge-count">{smpCountClass2}</span>
                 </button>
-                <button
-                  class:active={selectedSmpGrade === "3"}
-                  on:click={() => (selectedSmpGrade = "3")}
-                >
+                <button class:active={selectedSmpGrade === "3"} on:click={() => (selectedSmpGrade = "3")}>
                   🏫 SMP Kelas 3 (IX) • <span class="badge-count">{smpCountClass3}</span>
                 </button>
               </div>
             </div>
           {/if}
 
+          <!-- CHIP RINGKASAN: BISA DITEKAN -->
           <div class="summary-chips">
-  <div class="chip green"><span>Hadir</span> <strong>{attendanceDraftSummary.hadir}</strong></div>
-  <div class="chip blue"><span>Izin</span> <strong>{attendanceDraftSummary.izin}</strong></div>
-  <div class="chip amber"><span>Sakit</span> <strong>{attendanceDraftSummary.sakit}</strong></div>
-  <div class="chip red"><span>Alpha</span> <strong>{attendanceDraftSummary.alpha}</strong></div>
-  <div class="chip purple"><span>Pulang</span> <strong>{attendanceDraftSummary.pulang}</strong></div> <!-- Ditambahkan -->
-  <div class="chip gray"><span>Belum Absen</span> <strong>{attendanceDraftSummary.belum}</strong></div>
-</div>
+            <button type="button" class="chip green" on:click={() => openStatusModal("sekolah", "hadir")}><span>Hadir</span> <strong>{attendanceDraftSummary.hadir}</strong></button>
+            <button type="button" class="chip blue" on:click={() => openStatusModal("sekolah", "izin")}><span>Izin</span> <strong>{attendanceDraftSummary.izin}</strong></button>
+            <button type="button" class="chip amber" on:click={() => openStatusModal("sekolah", "sakit")}><span>Sakit</span> <strong>{attendanceDraftSummary.sakit}</strong></button>
+            <button type="button" class="chip red" on:click={() => openStatusModal("sekolah", "alpha")}><span>Alpha</span> <strong>{attendanceDraftSummary.alpha}</strong></button>
+            <button type="button" class="chip purple" on:click={() => openStatusModal("sekolah", "pulang")}><span>Pulang</span> <strong>{attendanceDraftSummary.pulang}</strong></button>
+            <button type="button" class="chip gray" on:click={() => openStatusModal("sekolah", "belum")}><span>Belum Absen</span> <strong>{attendanceDraftSummary.belum}</strong></button>
+          </div>
 
           <div class="table-wrap-glass">
             <table class="zen-table">
@@ -1674,7 +1784,7 @@
                     </td>
                   </tr>
                 {:else}
-                  {#each attendanceStudents as santri}
+                  {#each attendanceStudents as santri (santri.id)}
                     {@const att = getAttendance(santri.id)}
                     <tr>
                       <td>
@@ -1695,6 +1805,7 @@
                         <select
                           class="select-pill"
                           value={getDraftAttendance(santri.id)}
+                          disabled={!canManageAttendance}
                           on:change={async (e) => {
                             const status = (e.currentTarget as HTMLSelectElement).value as AttendanceStatus;
                             setDraftAttendance(santri.id, status);
@@ -1731,10 +1842,12 @@
             <div>
               <span class="tag-badge emerald">HALAQAH AL-QUR'AN</span>
               <h2>Presensi & Absensi Ngaji</h2>
-              <p>Kelola absensi santri per sesi pengajian secara manual atau scan QR Code.</p>
+              <p>Kelola absensi santri per sesi pengajian secara manual atau scan QR Code. Tekan kotak ringkasan untuk melihat dan menyalin daftar nama.</p>
             </div>
             <div class="flex-actions">
-              <button class="btn-cta mini green" on:click={exportAttendanceRecapExcel}>📥 Export Excel</button>
+              {#if canManageAttendance}
+                <button class="btn-cta mini green" on:click={exportAttendanceRecapExcel}>📥 Export Excel</button>
+              {/if}
               <button class="btn-round-close" on:click={() => changeView("home")}>✕</button>
             </div>
           </div>
@@ -1750,7 +1863,7 @@
               <label>Pilih Sesi Halaqah</label>
               <select value={selectedNgajiSessionId} on:change={(e) => selectNgajiSession((e.currentTarget as HTMLSelectElement).value)}>
                 <option value="">-- Pilih Sesi Ngaji --</option>
-                {#each ngajiSessions as s}
+                {#each ngajiSessions as s (s.id)}
                   <option value={String(s.id)}>
                     Sesi {s.nama_sesi} {s.waktu_mulai ? `(${s.waktu_mulai.slice(0, 5)})` : ""}
                   </option>
@@ -1758,7 +1871,7 @@
               </select>
             </div>
 
-            <!-- TOGGLE MODE NGAJI (MANUAL vs SCANNER) -->
+            <!-- TOGGLE MODE NGAJI -->
             <div class="tab-segments ngaji-mode-toggle">
               <button
                 class:active={ngajiActiveSubTab === "manual"}
@@ -1775,19 +1888,17 @@
             </div>
           </div>
 
-          <!-- RINGKASAN STATUS NGAJI -->
+          <!-- CHIP RINGKASAN NGAJI: BISA DITEKAN -->
           <div class="summary-chips">
-            <div class="chip green"><span>Hadir</span> <strong>{ngajiSummaryCounts.hadir}</strong></div>
-            <div class="chip blue"><span>Izin</span> <strong>{ngajiSummaryCounts.izin}</strong></div>
-            <div class="chip amber"><span>Sakit</span> <strong>{ngajiSummaryCounts.sakit}</strong></div>
-            <div class="chip red"><span>Alpha</span> <strong>{ngajiSummaryCounts.alpha}</strong></div>
-            <div class="chip purple"><span>Pulang</span> <strong>{ngajiSummaryCounts.pulang}</strong></div>
-            <div class="chip gray"><span>Belum Absen</span> <strong>{ngajiSummaryCounts.belum}</strong></div>
+            <button type="button" class="chip green" on:click={() => openStatusModal("ngaji", "hadir")}><span>Hadir</span> <strong>{ngajiSummaryCounts.hadir}</strong></button>
+            <button type="button" class="chip blue" on:click={() => openStatusModal("ngaji", "izin")}><span>Izin</span> <strong>{ngajiSummaryCounts.izin}</strong></button>
+            <button type="button" class="chip amber" on:click={() => openStatusModal("ngaji", "sakit")}><span>Sakit</span> <strong>{ngajiSummaryCounts.sakit}</strong></button>
+            <button type="button" class="chip red" on:click={() => openStatusModal("ngaji", "alpha")}><span>Alpha</span> <strong>{ngajiSummaryCounts.alpha}</strong></button>
+            <button type="button" class="chip purple" on:click={() => openStatusModal("ngaji", "pulang")}><span>Pulang</span> <strong>{ngajiSummaryCounts.pulang}</strong></button>
+            <button type="button" class="chip gray" on:click={() => openStatusModal("ngaji", "belum")}><span>Belum Absen</span> <strong>{ngajiSummaryCounts.belum}</strong></button>
           </div>
 
-          <!-- ==============================================
-               SUB-VIEW 1: INPUT MANUAL PRESENSI NGAJI
-          ============================================== -->
+          <!-- SUB-VIEW 1: INPUT MANUAL PRESENSI NGAJI -->
           {#if ngajiActiveSubTab === "manual"}
             <div class="manual-ngaji-panel">
               <div class="sub-panel-bar">
@@ -1826,7 +1937,7 @@
                           </td>
                         </tr>
                       {:else}
-                        {#each ngajiFilteredSantriList as santri}
+                        {#each ngajiFilteredSantriList as santri (santri.id)}
                           {@const stStatus = getNgajiStudentStatus(santri.id)}
                           {@const rowData = ngajiAttendanceRows.find(r => Number(r.user_id) === Number(santri.id))}
                           <tr>
@@ -1845,10 +1956,10 @@
                               </span>
                             </td>
                             <td>
-                              <!-- SELECT MANUAL DENGAN PILIHAN LENGKAP -->
                               <select
                                 class="select-pill ngaji-select"
                                 value={stStatus}
+                                disabled={!canManageAttendance}
                                 on:change={async (e) => {
                                   const val = (e.currentTarget as HTMLSelectElement).value as AttendanceStatus;
                                   await saveNgajiAttendanceManual(santri.id, val);
@@ -1881,9 +1992,7 @@
               {/if}
             </div>
 
-          <!-- ==============================================
-               SUB-VIEW 2: SCAN BARCODE NGAJI
-          ============================================== -->
+          <!-- SUB-VIEW 2: SCAN BARCODE NGAJI -->
           {:else}
             <div class="scanner-sheet">
               <div class="scanner-arena">
@@ -1987,12 +2096,12 @@
           </div>
 
           <div class="schedule-timeline">
-            {#each schedulesByDay as dayGroup}
+            {#each schedulesByDay as dayGroup (dayGroup.day)}
               {#if dayGroup.schedules.length > 0}
                 <div class="day-cluster">
                   <span class="day-badge">{dayGroup.day}</span>
                   <div class="cluster-cards">
-                    {#each dayGroup.schedules as sc}
+                    {#each dayGroup.schedules as sc (sc.id)}
                       <div class="lesson-card">
                         <div class="lesson-time">🕒 {sc.time}</div>
                         <div class="lesson-info">
@@ -2042,7 +2151,7 @@
                 <label>Kelas</label>
                 <select bind:value={gradeFilterClass} on:change={() => (gradeFilterStudent = "")}>
                   <option value="">Semua Kelas</option>
-                  {#each classes as c}
+                  {#each classes as c (c.id)}
                     <option value={c.id}>{c.name}</option>
                   {/each}
                 </select>
@@ -2052,7 +2161,7 @@
                 <label>Santri</label>
                 <select bind:value={gradeFilterStudent}>
                   <option value="">Semua Santri</option>
-                  {#each filteredGradeStudents as s}
+                  {#each filteredGradeStudents as s (s.id)}
                     <option value={s.id}>{s.username}</option>
                   {/each}
                 </select>
@@ -2096,7 +2205,7 @@
                 {:else if filteredGrades.length === 0}
                   <tr><td colspan="11" class="text-center-muted">Belum ada data nilai yang sesuai kriteria filter.</td></tr>
                 {:else}
-                  {#each filteredGrades as g}
+                  {#each filteredGrades as g (g.id)}
                     <tr>
                       {#if currentUser?.role !== "santri"}<td><strong>{getGradeStudentName(g.user_id)}</strong></td>{/if}
                       <td>{getGradeClassName(g.class_id)}</td>
@@ -2150,7 +2259,7 @@
                 <p>Informasi terbaru dari pimpinan atau administrasi pondok akan tertera di sini.</p>
               </div>
             {:else}
-              {#each announcements as item}
+              {#each announcements as item (item.id)}
                 <div class="announcement-bubble">
                   <div class="bubble-header">
                     <div>
@@ -2187,7 +2296,7 @@
           </div>
 
           <div class="qr-cards-grid">
-            {#each santriUsers as santri}
+            {#each santriUsers as santri (santri.id)}
               <div class="qr-card-item">
                 <div class="qr-head">
                   <span class="qr-institution">DAARULHIKAM</span>
@@ -2212,9 +2321,7 @@
     </div>
   </main>
 
-  <!-- ========================================================
-       MODERN DUAL-SCAN FLOATING DOCK (MOBILE NAV)
-  ======================================================== -->
+  <!-- MOBILE DOCK NAV -->
   <nav class="dock-navbar" aria-label="Navigasi Utama">
     <button class:active={activeView === "home"} on:click={() => changeView("home")}>
       <span class="dock-icon">⌂</span>
@@ -2261,11 +2368,47 @@
     </button>
   </nav>
 
-</div>
-
 <!-- =========================
      MODAL WINDOWS
 ========================= -->
+
+<!-- MODAL DAFTAR NAMA PER STATUS -->
+{#if showStatusModal}
+  <div class="zen-modal-curtain" on:click={closeStatusModal}>
+    <div class="zen-modal-box" on:click|stopPropagation>
+      <div class="modal-top">
+        <div>
+          <h3>
+            <span class="status-pill {statusModalStatus}">{statusModalTitle}</span>
+            <span class="modal-count">{statusModalNames.length} santri</span>
+          </h3>
+          <small class="text-sub">{statusModalSubtitle}</small>
+        </div>
+        <button class="modal-close-x" on:click={closeStatusModal}>✕</button>
+      </div>
+
+      {#if statusModalNames.length === 0}
+        <div class="empty-state-card">
+          <span class="empty-icon">🙌</span>
+          <p>Tidak ada santri dengan status ini.</p>
+        </div>
+      {:else}
+        <ol class="status-name-list">
+          {#each statusModalNames as nama}
+            <li>{nama}</li>
+          {/each}
+        </ol>
+      {/if}
+
+      <div class="modal-btns">
+        <button class="btn-cta mini outline" on:click={closeStatusModal}>Tutup</button>
+        <button class="btn-cta mini green" on:click={copyStatusNames} disabled={statusModalNames.length === 0}>
+          {statusCopied ? "✓ Tersalin" : "📋 Salin Nama"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- MODAL ATUR KELAS SANTRI -->
 {#if showStudentClassModal}
@@ -2279,7 +2422,7 @@
         <label>Pilih Santri</label>
         <select bind:value={selectedStudentForClass}>
           <option value="">-- Pilih Santri --</option>
-          {#each santriUsers as s}
+          {#each santriUsers as s (s.id)}
             <option value={s.id}>{s.full_name || s.username} ({s.class_name || "Belum ada kelas"})</option>
           {/each}
         </select>
@@ -2288,7 +2431,7 @@
         <label>Pilih Kelas Baru</label>
         <select bind:value={selectedClassForStudent}>
           <option value="">-- Pilih Kelas --</option>
-          {#each classes as c}
+          {#each classes as c (c.id)}
             <option value={c.id}>{c.name}</option>
           {/each}
         </select>
@@ -2314,14 +2457,14 @@
           <label>Kelas</label>
           <select bind:value={gradeClassId} on:change={() => { gradeStudentId = ""; }}>
             <option value="">-- Pilih Kelas --</option>
-            {#each classes as c}<option value={c.id}>{c.name}</option>{/each}
+            {#each classes as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
           </select>
         </div>
         <div class="field-item">
           <label>Santri</label>
           <select bind:value={gradeStudentId}>
             <option value="">-- Pilih Santri --</option>
-            {#each gradeStudents as s}<option value={s.id}>{s.username}</option>{/each}
+            {#each gradeStudents as s (s.id)}<option value={s.id}>{s.username}</option>{/each}
           </select>
         </div>
         <div class="field-item">
@@ -2408,7 +2551,7 @@
         <label>Pengampu</label>
         <select bind:value={scheduleTeacherId}>
           <option value="">Pilih Ustadz/Ustadzah</option>
-          {#each ustadUsers as u}<option value={u.id}>{u.username}</option>{/each}
+          {#each ustadUsers as u (u.id)}<option value={u.id}>{u.username}</option>{/each}
         </select>
       </div>
       <div class="field-item">
@@ -2422,6 +2565,8 @@
     </div>
   </div>
 {/if}
+
+</div>
 
 <style>
   :global(*) {
@@ -2696,16 +2841,6 @@
     color: var(--text-main);
   }
 
-  .badge-role {
-    font-size: 11px;
-    font-weight: 800;
-    padding: 5px 14px;
-    border-radius: 20px;
-    background: rgba(56, 189, 248, 0.15);
-    border: 1px solid rgba(56, 189, 248, 0.3);
-    color: #0284c7;
-  }
-
   /* CONTENT AREA */
   .zen-content {
     padding: 28px 32px 110px;
@@ -2891,6 +3026,19 @@
     margin-top: 4px;
   }
 
+  .tag-badge {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    padding: 4px 10px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+
+  .tag-badge.emerald { background: rgba(5, 150, 105, 0.18); color: #059669; }
+  .tag-badge.blue { background: rgba(37, 99, 235, 0.18); color: #2563eb; }
+
   .btn-round-close {
     width: 36px;
     height: 36px;
@@ -2910,9 +3058,7 @@
     flex-wrap: wrap;
   }
 
-  /* ========================================================
-     SMP CLASS PICKER SUB-BAR
-  ======================================================== */
+  /* SMP CLASS PICKER SUB-BAR */
   .smp-subnav-panel {
     background: var(--chip-bg);
     border: 1px solid var(--card-border);
@@ -2978,9 +3124,7 @@
     border: 1px solid var(--card-border);
   }
 
-  /* ========================================================
-     NGAJI CONTROLS & MANUAL PANEL
-  ======================================================== */
+  /* NGAJI CONTROLS & MANUAL PANEL */
   .ngaji-controls-panel {
     display: flex;
     gap: 14px;
@@ -3083,6 +3227,8 @@
     gap: 10px;
   }
 
+  .block { display: block; }
+
   .text-sub {
     color: var(--text-sub);
     font-size: 11px;
@@ -3109,6 +3255,7 @@
   }
 
   .status-pill {
+    display: inline-block;
     padding: 5px 12px;
     border-radius: 20px;
     font-size: 11px;
@@ -3329,6 +3476,26 @@
     min-width: 100px;
   }
 
+  /* CHIP SEBAGAI TOMBOL (BISA DITEKAN) */
+  button.chip {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text-main);
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  button.chip:hover {
+    transform: translateY(-2px);
+    border-color: #3b82f6;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  }
+
+  button.chip:active {
+    transform: scale(0.97);
+  }
+
   .chip.green strong { color: #16a34a; }
   .chip.blue strong { color: #2563eb; }
   .chip.amber strong { color: #d97706; }
@@ -3348,6 +3515,11 @@
     min-width: 120px;
   }
 
+  .select-pill:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   /* BUTTONS */
   .btn-cta {
     padding: 12px 24px;
@@ -3356,6 +3528,11 @@
     font-weight: 700;
     font-size: 13.5px;
     cursor: pointer;
+  }
+
+  .btn-cta:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 
   .btn-cta.mini {
@@ -3407,6 +3584,8 @@
     background: rgba(5, 150, 105, 0.15); border-color: rgba(5, 150, 105, 0.35);
   }
 
+  .student-scanned-card span { display: block; font-size: 12px; color: var(--text-sub); }
+
   .avatar-lg {
     width: 44px; height: 44px; border-radius: 12px; background: #2563eb;
     color: #ffffff; display: flex; align-items: center; justify-content: center; font-weight: 800;
@@ -3453,17 +3632,63 @@
 
   .zen-modal-box {
     background: var(--modal-bg); border: 1px solid var(--card-border);
-    border-radius: 24px; padding: clamp(16px, 3vw, 26px); width: 100%; max-width: 480px; 
+    border-radius: 24px; padding: clamp(16px, 3vw, 26px); width: 100%; max-width: 480px;
     display: flex; flex-direction: column; gap: 14px; max-height: 90vh; overflow-y: auto;
     color: var(--text-main);
   }
 
   .zen-modal-box.wide { max-width: 720px; }
-  .modal-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .modal-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 6px; }
   .modal-top h3 { font-size: 18px; color: var(--text-main); font-weight: 800; }
   .modal-close-x { background: none; border: none; color: var(--text-sub); font-size: 20px; cursor: pointer; }
   .modal-grid-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
   .modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+
+  /* MODAL DAFTAR NAMA PER STATUS */
+  .modal-count {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-sub);
+    margin-left: 8px;
+  }
+
+  .status-name-list {
+    list-style: none;
+    counter-reset: nama;
+    max-height: 50vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .status-name-list li {
+    counter-increment: nama;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--chip-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-main);
+  }
+
+  .status-name-list li::before {
+    content: counter(nama);
+    min-width: 24px;
+    height: 24px;
+    border-radius: 8px;
+    background: rgba(37, 99, 235, 0.15);
+    color: #2563eb;
+    font-size: 11.5px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 
   /* TOAST */
   .zen-toast {
@@ -3580,5 +3805,6 @@
     .btn-hero { width: 100%; justify-content: center; }
     .modal-grid-fields { grid-template-columns: 1fr; }
     .chip { flex: 1 1 calc(33% - 10px); }
+    .ngaji-mode-toggle { margin-left: 0; width: 100%; }
   }
 </style>
